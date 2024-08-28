@@ -1,0 +1,33 @@
+pipeline {
+  agent {
+    node {
+      label 'ccd_pipeline_jenkins_agent'
+    }
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 90, unit: 'MINUTES')
+    timestamps()
+  }
+  tools {
+    jdk 'JDK 1.8.0_101 vApp'
+    maven 'Maven 3.0.5'
+  }
+  stages {
+    stage('Change deployment status in DTT') {
+      steps {
+        sh "cd ansible; ansible-playbook -e deployment_id=${deployment_id} dtt-change-ccd-status.yml -vvv"
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}

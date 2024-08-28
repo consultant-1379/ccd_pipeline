@@ -1,0 +1,91 @@
+# Validate Prometheus targets and alerts
+# Both the deployment and central Prometheus is checked
+#
+# Input: deployment_id
+---
+- hosts: localhost
+  gather_facts: no
+  vars:
+    direct_pm_url: "http://prom.{{ deployment_id | mandatory }}.athtem.eei.ericsson.se/api/v1"
+    ignored_alerts:
+      - Watchdog
+      - PrometheusNotConnectedToAlertmanagers
+      - CPUThrottlingHigh
+  roles:
+    - deployment_id
+  tasks:
+    - name: Check Prometheus targets for {{ deployment_id }} on {{ direct_pm_url }}
+      uri:
+        method: GET
+        url: "{{ direct_pm_url }}/targets"
+        return_content: yes
+        body_format: json
+        status_code: 200
+      register: pm_targets
+
+    - name: Get active targets' health status
+      set_fact:
+        health: "{{ pm_targets.json | json_query('data.activeTargets[].health') | unique }}"
+
+    - name: Fail if no active targets found
+      fail:
+        msg: No active Prometheus found for {{ deployment_id }}
+      when: health | length == 0
+
+    - name: Fail if any targets are not up
+      fail:
+        msg: One or more Prometheus targets are down for {{ deployment_id }}
+      when: health | length != 1 or health[0] != 'up'
+
+    - name: Check Prometheus alerts for {{ deployment_id }} on {{ direct_pm_url }}
+      uri:
+        method: GET
+        url: "{{ direct_pm_url }}/alerts"
+        return_content: yes
+        body_format: json
+        status_code: 200
+      register: pm_alerts
+
+    - name: Get active alerts
+      set_fact:
+        alerts: "{{ pm_alerts.json | json_query(qry) }}"
+      vars:
+        qry: data.alerts[?(@.state == 'firing')]
+
+    - name: Check for firing alerts for {{ deployment_id }}
+      block:
+        - name: Show firing alerts' details
+          debug:
+            msg: "{{ alerts }}"
+
+        - name: Show firing alert names
+          debug:
+            msg: >
+              WARNING: Alerts firing for {{ deployment_id }}:
+              {{ alerts | json_query('[].labels.alertname') | difference(ignored_alerts) | join(', ') }}
+      when: alerts | json_query('[].labels.alertname') | difference(ignored_alerts) | length > 0
+
+    - name: Get the central Prometheus IP (because it's not in DNS)
+      include_role:
+        name: prometheus
+
+    - name: Check Prometheus alerts for {{ deployment_id }} on central Prometheus
+      uri:
+        method: GET
+        url: "http://{{ prometheus_conf.prometheusvip }}:9090/api/v1/alerts"
+        return_content: yes
+        body_format: json
+        status_code: 200
+      retries: 1
+      register: central_pm_alerts
+
+    - name: Get alerts for {{ deployment_id }} using the declname label
+      set_fact:
+        central_alerts: "{{ central_pm_alerts.json | json_query(qry) }}"
+      vars:
+        qry: "data.alerts[?(@.labels.declname == '{{ deployment_id }}')]"
+
+    - name: Fail if alerts found for {{ deployment_id }}
+      fail:
+        msg: "Alerts found for {{ deployment_id }}: {{ central_alerts }}"
+      when: central_alerts | length > 0

@@ -1,0 +1,19 @@
+---
+- name: Create VM Instance on OpenStack
+  os_server:
+    auth: "{{ cloud_auth }}"
+    state: present
+    name: "{{ instance_name }}"
+    image: "{{ image_name }}"
+    timeout: 200
+    flavor: "{{ flavor_name }}"
+    network: "{{ network }}"
+    volumes: "{{ volumes }}"
+    security_groups: "{{ security_group_name | default([]) }}"
+    auto_ip: yes
+    userdata: "{{ cloud_init_data | default([]) }}"
+  register: vm_instance_results
+
+- name: Set the VM Instance Result
+  set_fact:
+    osk_vm_instance_results: "{{ vm_instance_results }}"

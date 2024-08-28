@@ -1,0 +1,134 @@
+---
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Show build server creds from Minio
+      block:
+        - name: Get build_server.yml
+          include_role:
+            name: creds
+          vars:
+            name: build_server
+            file: build_server.yml
+
+        - name: Display build_server creds
+          debug:
+            msg: "{{ build_server }}"
+      tags:
+        - build_server
+        - buildserver
+        - bs
+
+    - name: Show upgrade build server creds from Minio
+      block:
+        - name: Get upgrade_build_server.yml
+          include_role:
+            name: creds
+          vars:
+            name: upgrade_build_server
+            file: upgrade_build_server.yml
+
+        - name: Display upgrade_build_server creds
+          debug:
+            msg: "{{ upgrade_build_server }}"
+      tags:
+        - upgrade_build_server
+        - upgradebuildserver
+        - ubs
+
+    - name: Show Prometheus creds from Minio
+      block:
+        - name: Get prometheus.yml
+          include_role:
+            name: creds
+          vars:
+            name: prometheus
+            file: prometheus.yml
+
+        - name: Display prometheus creds
+          debug:
+            msg: "{{ prometheus }}"
+      tags:
+        - prometheus
+        - pm
+
+    - name: Show OpenStack creds from Minio
+      block:
+        - name: Get openstack_creds.yml
+          include_role:
+            name: creds
+          vars:
+            name: openstack_creds
+            file: openstack_creds.yml
+
+        - name: Display openstack_creds creds
+          debug:
+            msg: "{{ openstack_creds }}"
+      tags:
+        - openstack_creds
+        - openstack
+        - os
+
+    - name: Show DTT creds from Minio
+      block:
+        - name: Get dtt_credentials.yml
+          include_role:
+            name: creds
+          vars:
+            name: dtt_credentials
+            file: dtt_credentials.yml
+
+        - name: Display dtt_credentials creds
+          debug:
+            msg: "{{ dtt_credentials }}"
+      tags:
+        - dtt_credentials
+        - dtt
+
+    - name: Show Grafana creds from Minio
+      block:
+        - name: Get grafana.yml
+          include_role:
+            name: creds
+          vars:
+            name: grafana
+            file: grafana.yml
+
+        - name: Display Grafana creds
+          debug:
+            msg: "{{ grafana }}"
+      tags:
+        - grafana
+        - gf
+
+    - name: Show ELK server creds from Minio
+      block:
+        - name: Get elk.yml
+          include_role:
+            name: creds
+          vars:
+            name: elk
+            file: elk.yml
+
+        - name: Display elk creds
+          debug:
+            msg: "{{ elk }}"
+      tags:
+        - elk
+        - es
+
+    - name: Show Ubuntu creds from Minio
+      block:
+        - name: Get ubuntu.yml
+          include_role:
+            name: creds
+          vars:
+            name: ubuntu
+            file: ubuntu.yml
+
+        - name: Display Ubuntu creds
+          debug:
+            msg: "{{ ubuntu }}"
+      tags:
+        - ubuntu
+        - ub

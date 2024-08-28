@@ -1,0 +1,22 @@
+---
+- name: Uninstall K8set
+  kubernetes.core.helm:
+    name: "{{ release_name }}"
+    namespace: "{{ namespace }}"
+    binary_path: "{{ helm_path }}"
+    kubeconfig_path: "{{ kubeconfig_path }}"
+    state: absent
+  tags:
+    - skip_ansible_lint
+
+- name: Wait for pods to be removed
+  k8s_info:
+    kind: Pod
+    api_version: v1
+    kubeconfig: "{{ kubeconfig_path }}"
+    label_selectors:
+      - app.kubernetes.io/name=k8set
+  register: pods
+  until: pods.resources | length == 0
+  retries: 60
+  delay: 10

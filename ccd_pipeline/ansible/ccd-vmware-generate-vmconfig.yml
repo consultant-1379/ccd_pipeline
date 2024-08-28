@@ -1,0 +1,119 @@
+---
+#~# Playbook to Generate CCD Deploy config for VMware
+
+- name: Generate vmconfig file for VMware VM deploy
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    minio_bucket:
+      ipaddr: cloud # Bucket where ipplan & vcenter_env is located
+      templates: templates # Bucket where vcenter templates (j2) are located
+      config: ccd # Bucket to deploy the generated config files
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+    - name: Assign ccd_flavour & vcenter_cluster the values from DTT
+      set_fact:
+        vcenter_cluster: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(cluster_query) | first }}"
+        ccd_flavour: "{{ dtt_deployment.products[0].flavour_name }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        cluster_query: "[? key_name == 'vcenterCluster'].key_value"
+
+    - name: Use "dtt_name"({{ dtt_name }}) to calculate which pod[x] [-vcenter-networks.yml & -ipplan.csv]  to use
+      set_fact:
+        networks_file: "pod{{ dtt_name[1] }}-vcenter-networks.yml"
+        ip_plan_file: "pod{{ dtt_name[1] }}-ipplan.csv"
+      when: dtt_name | regex_search("^p[a-z][0-9]$")
+
+    - name: Pull down all the required files from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "{{ item.bucket }}"
+        object: "{{ item.object_dir }}{{ item.file_name }}"
+        dest: /tmp/{{ item.file_name }}
+        mode: get
+      loop:
+        - bucket: "{{ minio_bucket.ipaddr }}"
+          file_name: "{{ ip_plan_file }}"
+          object_dir: ""
+        - bucket: "{{ minio_bucket.ipaddr }}"
+          file_name: "{{ networks_file }}"
+          object_dir: ""
+        - bucket: "{{ minio_bucket.templates }}"
+          file_name: "{{ ccd_flavour }}.yml"
+          object_dir: "/vcenter/"
+        - bucket: "{{ minio_bucket.templates }}"
+          file_name: "vmconfig.j2"
+          object_dir: "/vcenter/"
+
+    - name: Include retrieved {{ networks_file }} & {{ ccd_flavour }}.yml as vars
+      include_vars: /tmp/{{ item }}
+      loop:
+        - "{{ networks_file }}"
+        - "{{ ccd_flavour }}.yml"
+
+    - name: Parse {{ ip_plan_file }}
+      read_csv:
+        path: /tmp/{{ ip_plan_file }}
+        fieldnames: hostname,ip_address
+        delimiter: ','
+      register: ip_addresses
+
+    - name: Find {{ deployment_id }} Master IP Addresses
+      set_fact:
+        master_ips: "{{ master_ips | default([]) + [ item ] }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(master_query) }}"
+      vars:
+        master_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'master')] | [?!contains(hostname, 'vip')]"
+
+    - name: Find {{ deployment_id }} Worker IP Addresses
+      set_fact:
+        worker_ips: "{{ worker_ips | default([]) + [ item ] }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(worker_query) }}"
+      vars:
+        worker_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'worker')]"
+
+    - name: Fail if {{ ip_plan_file }} Node counts < Flavour Node counts
+      fail: msg="Node counts mismatch! Not enough nodes specified in {{ ip_plan_file }} for flavour {{ ccd_flavour }}. Please verify"
+      when: >
+        (master_ips|length < parameters.masters.node_count) or
+        (worker_ips|length < parameters.workers.node_count)
+
+    - name: Generate {{ deployment_id }}.vmconfig.yml Parameters file
+      template:
+        src: /tmp/vmconfig.j2
+        dest: /tmp/{{ deployment_id }}.vmconfig.yml
+        mode: '0666'
+
+    - name: Upload {{ deployment_id }}.vmconfig.yml to MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: de-cni
+        object: /{{ minio_bucket.config }}/{{ deployment_id }}/{{ item }}
+        src: /tmp/{{ item }}
+        mode: put
+      loop:
+        - "{{ deployment_id }}.vmconfig.yml"
+
+    - name: Cleanup & Delete local temp files
+      file:
+        path: /tmp/{{ item }}
+        state: absent
+      loop:
+        - "{{ deployment_id }}.vmconfig.yml"
+        - "{{ ip_plan_file }}"
+        - "{{ networks_file }}"
+        - "{{ ccd_flavour }}.yml"
+        - "vmconfig.j2"
+
+#~# End Playbook
+...

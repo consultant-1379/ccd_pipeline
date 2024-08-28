@@ -1,0 +1,82 @@
+---
+# These defaults can be overridden by passing in vars to the role
+
+namespace: de-cni-monitoring
+release_name: k8set
+
+# Default config and requirements for K8set
+default_k8set:
+  version: 1.20.0
+  network:
+    tcpLatencyMs: 0.5
+    tcpThroughputMiB: 100
+    tcpNbThroughputMiB: 80
+
+    udpLatencyMs: 0.5
+    udpSendThroughputMiB: 100
+    udpReceiveThroughputMiB: 50
+    udpNbSendThroughputMiB: 100
+    udpNbReceiveThroughputMiB: 50
+
+  storage:
+    storageClass: network-block
+    readIops: 4000
+    writeIops: 4000
+    readThroughputMiB: 25
+    writeThroughputMiB: 25
+    readLatencyMs: 2
+    writeLatencyMs: 5
+
+  controlplane:
+    storageClass: network-block
+
+# Cloud-specific config and requirements
+c12a_k8set:
+  version: 1.20.0
+  network:
+    tcpLatencyMs: 1
+    tcpThroughputMiB: 50
+    tcpNbThroughputMiB: 50
+
+    udpLatencyMs: 1
+    udpSendThroughputMiB: 80
+    udpReceiveThroughputMiB: 10
+    udpNbSendThroughputMiB: 80
+    udpNbReceiveThroughputMiB: 10
+
+  storage:
+    storageClass: network-block
+    readIops: 4000
+    writeIops: 4000
+    readThroughputMiB: 25
+    writeThroughputMiB: 25
+    readLatencyMs: 5
+    writeLatencyMs: 10
+
+  controlplane:
+    storageClass: network-block
+
+c16a_k8set:
+  version: 1.20.0
+  network:
+    tcpLatencyMs: 0.3
+    tcpThroughputMiB: 100
+    tcpNbThroughputMiB: 100
+
+    udpLatencyMs: 1
+    udpSendThroughputMiB: 100
+    udpReceiveThroughputMiB: 50
+    udpNbSendThroughputMiB: 100
+    udpNbReceiveThroughputMiB: 50
+
+  storage:
+    storageClass: network-block
+    readIops: 4000
+    writeIops: 4000
+    readThroughputMiB: 100
+    writeThroughputMiB: 100
+    readLatencyMs: 5
+    writeLatencyMs: 10
+
+  controlplane:
+    storageClass: network-block

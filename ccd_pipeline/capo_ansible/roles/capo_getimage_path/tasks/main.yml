@@ -1,0 +1,30 @@
+#Role to fetch CAPO deployment Image ccdadm path from build server
+---
+- name: Get the CAPO image directory for {{ ccd_version }}
+  find:
+    paths: "{{ search_image_dir }}"
+    file_type: directory
+    use_regex: yes
+    patterns: ".*{{ ccd_version }}.*"
+  register: capo_dir
+
+- name: Verify Image Directory Search has Returned Results
+  assert:
+    that: capo_dir.files | length > 0
+    fail_msg:
+      - No Image Directory Found for '{{ ccd_version }}'.
+      - Please Ensure search location '{{ search_image_dir }}' is correct.
+      - Exiting Playbook!
+
+- name: Set variable for {{ ccd_version }} directory
+  set_fact:
+    ccdadm_dir: "{{ capo_dir.files[0].path }}"
+
+- name: Get the ccdadm exectuable for CAPO {{ ccd_version }}
+  find:
+    paths: "{{ ccdadm_dir }}"
+    file_type: file
+    recurse: yes
+    use_regex: yes
+    patterns: "ccdadm"
+  register: ccdadm

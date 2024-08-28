@@ -1,0 +1,9 @@
+---
+# Validate that deployment ID is defined
+# Input variable(s):
+#   deployment_id - Deployment ID
+
+- name: Verify deployment_id is defined
+  fail:
+    msg: Required parameter 'deployment_id' is not defined
+  when: deployment_id is not defined

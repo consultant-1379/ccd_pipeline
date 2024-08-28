@@ -1,0 +1,33 @@
+---
+- name: Download Openstack Images Credentials from MinIO
+  include_role:
+    name: creds
+    apply:
+      delegate_to: localhost
+  vars:
+    name: openstack_access_vars
+    file: openstack_creds.yml
+
+- name: Ensure Image is Present on OpenStack
+  os_image:
+    auth:
+      auth_url: "{{ cloud_auth.auth_url }}"
+      username: "{{ openstack_access_vars.openstack_user }}"
+      password: "{{ openstack_access_vars.openstack_password }}"
+      project_name: de_cni_images
+      project_domain_name: Default
+      user_domain_name: Default
+    name: "{{ image_name }}"
+    container_format: bare
+    disk_format: raw
+    state: present
+    filename: "{{ image_file }}"
+    is_public: true
+    properties:
+      cpu_arch: x86_64
+      distro: ubuntu
+  register: image_result
+
+- name: Set the Image Result
+  set_fact:
+    osk_image_results: "{{ image_result.image }}"

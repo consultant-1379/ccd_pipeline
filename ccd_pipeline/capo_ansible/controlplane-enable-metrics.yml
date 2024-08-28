@@ -1,0 +1,44 @@
+---
+# Playbook to apply a fix for the kube-controller & scheduler
+# The bind address is incorrectly assigned on install.
+# Fix is to change bind address to 0.0.0.0
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# NB: Vars files used in this playbook require ansible-vault decrypting
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook controlplane-enable-metrics.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook controlplane-enable-metrics.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Play to Generate ControlPlane VM Inventory
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  roles:
+    - role: capo_cp_inventory
+      vars:
+        add_group: cp_nodes
+
+- name: Enable metrics collection for kube-scheduler and controller
+  hosts: cp_nodes
+  become: yes
+  gather_facts: no
+  vars:
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+  tasks:
+    - name: Enable listen on all interfaces to allow metrics collection
+      lineinfile:
+        state: present
+        path: "{{ item }}"
+        backrefs: yes
+        regex: '^(\s*- --bind-address)=[\d\.]+$'
+        line: '\1=0.0.0.0'
+      loop:
+        - /etc/kubernetes/manifests/kube-scheduler.yaml
+        - /etc/kubernetes/manifests/kube-controller-manager.yaml

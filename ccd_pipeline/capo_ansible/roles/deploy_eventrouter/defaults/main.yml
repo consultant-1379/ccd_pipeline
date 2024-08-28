@@ -1,0 +1,5 @@
+---
+# These defaults can be overridden by passing in vars to the role
+elastic_url: http://de-cni.athtem.eei.ericsson.se:9200
+namespace: kube-system
+release_name: eventrouter

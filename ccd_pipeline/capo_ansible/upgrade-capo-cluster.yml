@@ -1,0 +1,83 @@
+---
+# Playbook to Upgrade a CAPO Cluster for a passed in deployment_id.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook upgrade-capo-cluster.yml -e deployment_id=<deployment_id> --ask-vault-pass [ -e search_image_dir=/path/to/dir ]
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook upgrade-capo-cluster.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file [ -e search_image_dir=/path/to/dir ]
+#
+- name: Upgrade CAPO Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  roles:
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: true
+  tasks:
+    - name: Verify CCD Version & Upgrade Version defined
+      assert:
+        that:
+          - dtt_ccd_version is defined
+          - dtt_upgrade_ccd_version is defined
+        fail_msg:
+          - Either CCD Version or Upgrade Version not present on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Please verify product configuration contains 'version' & 'upgrade_version'
+
+    - name: Block to Perform CAPO Upgrade
+      delegate_to: "{{ build_server_ip }}"
+      block:
+        - name: Fetch Path For Current Deployed Image
+          include_role:
+            name: capo_getimage_path
+          vars:
+            ccd_version: "{{ dtt_ccd_version }}"
+
+        - name: Set Path & Bin for Current Image
+          set_fact:
+            deployed_image_path: "{{ ccdadm_dir }}"
+
+        - name: Fetch Path & Bin For Upgrade Image
+          include_role:
+            name: capo_getimage_path
+          vars:
+            ccd_version: "{{ dtt_upgrade_ccd_version }}"
+
+        - name: Set Path & Bin for Upgrade Image
+          set_fact:
+            upgrade_image_path: "{{ ccdadm_dir }}"
+            upgrade_image_bin: "{{ (ccdadm.files | first).path }}"
+
+        - name: Display Pre-Upgrade Message
+          debug:
+            msg:
+              - Beginning CAPO Upgrade.
+              - Deployment - {{ deployment_id }}
+              - From Version - {{ deployed_image_path }}
+              - To Version - {{ upgrade_image_path }}
+              - ccdadm Executable - {{ upgrade_image_bin }}
+
+        - name: Perform CAPO Upgrade
+          include_role:
+            name: capo_upgrade
+
+        - name: Copy Deployment Context Directory from Original to Upgraded Version Image
+          copy:
+            remote_src: yes
+            src: "{{ deployed_image_path }}/{{ deployment_id }}"
+            dest: "{{ upgrade_image_path }}/"
+
+        - name: Delete Context Directory From Original Deployed Version Image
+          file:
+            path: "{{ deployed_image_path }}/{{ deployment_id }}"
+            state: absent

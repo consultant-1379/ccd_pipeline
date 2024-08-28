@@ -1,0 +1,23 @@
+## Partial Auotomated Playbook for non-cENM CCD Post Installation
+
+## Default (DTT, DIT and CCD flavor must be ready): source director VIP from OpenStack and check if cluster is cENM from CCD flavor
+##   ansible-playbook post_deploy.yml -e deployment_id={ccd deployment id}
+
+## Deploy non-cENM CCD post installation steps
+## Usage 1: Source director VIP from OpenStack (DTT and DIT must be ready)
+##   ansible-playbook post-deploy.yml -e deployment_id={ccd deployment id} is_cenm=false
+## Usage 2: manually pass the director VIP
+##   ansible-playbook post-deploy.yml -e deployment_id={ccd deployment id} is_cenm=false director_ip={ccd director VIP}
+
+## Deploy cENM CCD post installation steps
+## Usage 1: Source director VIP from OpenStack (DTT and DIT must be ready)
+##   ansible-playbook post-deploy.yml -e deployment_id={ccd deployment id} is_cenm=true
+## Usage 2: manually pass the director VIP
+##   ansible-playbook post-deploy.yml -e deployment_id={ccd deployment id} is_cenm=true director_ip={ccd director VIP}
+
+---
+- import_playbook: upload-ccd-info-to-minio.yml
+- import_playbook: deploy-monitoring-components.yml
+- import_playbook: healthcheck.yml
+- import_playbook: add-ccd-to-prom.yml
+- import_playbook: dtt-update-ccd-deployment.yml

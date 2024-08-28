@@ -1,0 +1,2 @@
+---
+jira_module_url: "{{ jira_url.split('/rest') | first }}"

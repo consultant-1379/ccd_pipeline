@@ -1,0 +1,12 @@
+---
+- name: Search OpenStack for VM(s)
+  os_server_info:
+    auth: "{{ cloud_auth }}"
+    server: '{{ vm_pattern }}'
+    filters:
+      vm_state: "{{ state }}"
+  register: vm_search_results
+
+- name: Set the Searched VMs Result
+  set_fact:
+    osk_vm_results: "{{ vm_search_results.openstack_servers }}"

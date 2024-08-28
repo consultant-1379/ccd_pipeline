@@ -1,0 +1,72 @@
+---
+# Playbook to Update the CAPO target deployment flavor template.
+# The value of ccd_version is changed/updated with the value of upgrade_version.
+# Value of upgrade_version is retrieved from Deployment DTT entry.
+#
+# This playbook is used as part of the Upgrade Pipeline.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook upgrade-version-flavor-template.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook upgrade-version-flavor-template.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Change the target deployment flavor template ccd_version with the upgrade_version
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+  tasks:
+    - name: Block to Update the CAPO target deployment flavor template
+      block:
+        - name: Verify CCD Flavor & Upgrade Version defined
+          assert:
+            that:
+              - dtt_ccd_flavor is defined
+              - dtt_upgrade_ccd_version is defined
+            fail_msg:
+              - Either CCD Flavor or Upgrade Version not present on Deployment ( {{ deployment_id }} ) DTT Entry.
+              - Please verify product configuration contains 'ccdFlavor' & 'upgrade_version'
+
+        - name: Get CCD Flavor Template file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: templates
+            object: /managed-config/{{ dtt_ccd_flavor }}/{{ dtt_ccd_flavor }}.template.yml
+            mode: get
+            ignore_nonexistent_bucket: True
+            dest: /tmp/{{ dtt_ccd_flavor }}.template.yml
+
+        - name: Update CCD Version in CCD Flavor Template file
+          replace:
+            path: /tmp/{{ dtt_ccd_flavor }}.template.yml
+            regexp: 'ccd_version:.*'
+            replace: 'ccd_version: {{ dtt_upgrade_ccd_version.split("-")[:2] | join("-") }}'
+
+        - name: Update {{ dtt_ccd_flavor }}.template.yml in MinIO bucket
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            encrypt: no
+            bucket: templates
+            object: /managed-config/{{ dtt_ccd_flavor }}/{{ dtt_ccd_flavor }}.template.yml
+            src: /tmp/{{ dtt_ccd_flavor }}.template.yml
+            mode: put
+            ignore_nonexistent_bucket: True
+      always:
+        - name: Delete {{ dtt_ccd_flavor }}.template.yml file
+          file:
+            path: /tmp/{{ dtt_ccd_flavor }}.template.yml
+            state: absent

@@ -1,0 +1,49 @@
+# https://confluence-oss.seli.wh.rnd.internal.ericsson.com/display/CIE/Cloud+Maintenance+Window+Playbook+Guide
+  - name: Import role 'project-info-dtt' to get project details from DTT
+    import_role:
+      name: project-info-dtt
+
+  - name: Get Openstack project vms
+    os_server_info:
+      auth:
+        username: "{{ proj_username }}"
+        project_name: "{{ proj_name }}"
+        password: "{{ proj_password }}"
+        auth_url: "{{ cloud_auth_url }}"
+        user_domain_name: "{{ user_domain }}"
+        project_domain_name: "{{ proj_domain }}"
+    register: result
+
+  - name: Clear all vm lists
+    set_fact:
+      vm_list_powerup: []
+      vm_list_powerdown: []
+      vm_list: []
+
+  - name: List Openstack project vms
+    set_fact:
+      vm_list_powerdown: "{{ vm_list_powerdown | default([]) + [ item ] }}"
+    with_items: "{{ result|json_query('openstack_servers[*].hostname') }}"
+
+  - name: Set fact for vms in power up order
+    set_fact:
+      vm_list_powerup: "{{ vm_list_powerdown|sort }}"
+
+  - name: Set vm power up/down order for vms request {{ vm_directive.vmaction }}
+    set_fact:
+      vm_list: "{{ vm_list_powerdown if vm_directive.vmaction == 'stop' else vm_list_powerup }}"
+
+  - name: "Openstack project {{ vm_directive.vmaction }} vms"
+    os_server_action:
+      action: "{{ vm_directive.vmaction }}"
+      auth:
+        username: "{{ proj_username }}"
+        project_name: "{{ proj_name }}"
+        password: "{{ proj_password }}"
+        auth_url: "{{ cloud_auth_url }}"
+        user_domain_name: "{{ user_domain }}"
+        project_domain_name: "{{ proj_domain }}"
+      server: "{{ item }}"
+      timeout: 300
+    with_items: "{{ vm_list }}"
+    changed_when: false

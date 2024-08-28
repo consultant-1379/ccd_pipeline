@@ -1,0 +1,37 @@
+---
+# Get results of run
+# Wait for results to be ready and download
+- name: Start port-forward to K8set service
+  command: kubectl port-forward --kubeconfig={{ kubeconfig_path }} -n de-cni-monitoring svc/kbench-http 8888:8080
+  async: 3600
+  poll: 0
+  changed_when: no
+  notify: End port-forward to K8set service
+
+- name: Wait 10 seconds
+  pause:
+    seconds: 10
+
+- name: Get K8set status
+  uri:
+    url: http://localhost:8888/status
+    method: GET
+    return_content: yes
+  register: k8s_response
+  until: k8s_response.status in [200, 503]
+  retries: 120
+  delay: 30
+  ignore_errors: yes
+
+- name: Get K8set results
+  uri:
+    url: http://localhost:8888/json
+    method: GET
+    body_format: json
+  register: k8s_results
+
+- name: Save status and results
+  set_fact:
+    k8set_status_code: "{{ k8s_response.status }}"
+    k8set_status_msg: "{{ k8s_response.content }}"
+    k8set_results: "{{ k8s_results.json }}"

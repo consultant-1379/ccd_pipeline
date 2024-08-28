@@ -1,0 +1,4 @@
+    - peer_address: ggn_gateway_a
+      peer_asn: 4247584932
+    - peer_address: ggn_gateway_b
+      peer_asn: 4247584932

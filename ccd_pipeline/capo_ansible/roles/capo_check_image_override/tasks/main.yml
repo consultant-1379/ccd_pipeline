@@ -1,0 +1,40 @@
+---
+- name: Role Requirement, Ensure `capo_image_override` Defined
+  assert:
+    that:
+      - capo_image_override is defined
+    fail_msg:
+      - "Required var `capo_image_override` not defined."
+      - "Example: staging"
+      - "Exiting playbook!"
+    success_msg: "Required var defined."
+
+- name: Retrieve Override File Contents
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: de-cni
+    object: /capo_image_override/{{ override_file }}.yml
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  register: override_file_content
+
+- name: Set the 'image_url' & 'image_version' vars if present in Override File
+  set_fact:
+    image_url: "{{ file_contents[capo_image_override].image_url }}"
+    image_version: "{{ file_contents[capo_image_override].image_version }}"
+  vars:
+    file_contents: "{{ override_file_content.contents | from_yaml }}"
+  changed_when:
+    - image_url is defined
+    - image_version is defined
+  notify: Update State
+  when:
+    - capo_image_override in file_contents
+    - file_contents[capo_image_override].image_version is defined
+    - file_contents[capo_image_override].image_url is defined
+    - file_contents[capo_image_override].image_version
+    - file_contents[capo_image_override].image_url
+    - file_contents[capo_image_override].state is defined
+    - file_contents[capo_image_override].state == 'Active'

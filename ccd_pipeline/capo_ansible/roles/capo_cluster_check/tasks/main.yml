@@ -1,0 +1,13 @@
+#
+# Role to Check CCD CAPO existency in DTT
+#
+# To-do: This role should be used into all capo playbooks
+#
+- name: Check CCD CAPO existency in DTT
+  fail:
+    msg: Failure. Not a CAPO Deployment, Exiting Playbook.
+  vars:
+    products_qry: "[? product_type_name == 'CCD'].configuration"
+    capo_qry: "[? key_name == 'ccd'].key_value"
+    ccd_capo_query: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(capo_qry) }}"
+  when: ccd_capo_query | length == 0

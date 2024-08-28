@@ -1,0 +1,8 @@
+---
+- name: Update State
+  include_tasks: update_state.yml
+
+- name: Remove Tmp File
+  file:
+    path: tmp_image_override.yml
+    state: absent

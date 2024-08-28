@@ -1,0 +1,155 @@
+# Check if required images exist in OpenStack. If not, upload from build server.
+
+- hosts: localhost
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+
+  tasks:
+    - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+      command: >
+        lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+      register: sftp_result
+      ignore_errors: yes
+    
+    - name: Parse JSON content
+      set_fact:
+        deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+    - name: Display the variable
+      debug:
+        var: deployment_data
+
+    - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+      set_fact:
+        ccd_flavor_name: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+    - name: Get CCD Flavor Template file from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: ccd_flavor_template
+
+    - name: Import variables from flavor template file
+      set_fact:
+        template_vars: "{{ ccd_flavor_template.contents|from_yaml }}"
+
+    - name: Save ccd version into variable on local
+      set_fact:
+        ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+    - name: Download openstack credentials from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        bucket: tools
+        object: openstack_creds.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: openstack_access
+
+    - name: Import variables from openstack creds file
+      #no_log: yes
+      set_fact:
+        openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+
+    - name: Set openstack username and password vars from openstack creds var
+      #no_log: yes
+      set_fact:
+        openstack_user: "{{ openstack_access_vars.openstack_user }}"
+        openstack_password: "{{ openstack_access_vars.openstack_password }}"
+
+    - name: "Check cloud for existing version {{ ccd_version }} images"
+      os_image_info:
+        verify: no 
+        auth:
+          auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        image: "eccd-{{ ccd_version }}-{{ item }}"
+      register: result
+      with_items:
+        - "director"
+        - "node"
+
+    - name: Display results
+      debug:
+        var: result
+
+    - name: Upload images to OpenStack cloud
+      block:
+        - name: Ensure local download directory exists
+          file:
+            path: "/tmp/images"
+            state: directory
+
+        - name: download images from XDN SFTP
+          command:  >
+            lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+            'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+            set ftp:proxy ;
+            mirror ccd_pipeline/images /tmp/images;exit'
+            sftp://{{ sftp_host }}
+          register: sftp_result_upload
+        
+        - name: Display results of SFTP download
+          debug:
+            var: sftp_result_upload
+
+        - name : Unpack images
+          command: "/bin/bash -c 'cd /tmp/images && for item in $(ls | grep tgz); do tar xvfz $item; done'"
+
+        - name: Find CCD {{ ccd_version }} image paths
+          find:
+            paths: /tmp/images
+            file_type: file
+            use_regex: yes
+            recurse: yes
+            patterns: ".*{{ ccd_version }}.*qcow2$"
+          register: images
+
+        - name: Fail if image files not found
+          fail:
+            msg: Coud not find image files for CCD version {{ ccd_version }}
+          when: images.files | length < 2
+
+        - name: Upload director and node images
+          os_image:
+            auth:
+              auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+              username: "{{ openstack_user }}"
+              password: "{{ openstack_password }}"
+              project_name: stsccdpipeline
+              project_domain_name: Default
+              user_domain_name: Default
+            name: "{{ item.name }}"
+            container_format: bare
+            disk_format: qcow2
+            state: present
+            verify : no
+            filename: "{{ item.file }}"
+            properties:
+              cpu_arch: x86_64
+              distro: ubuntu
+          vars:
+            director: "[?contains(path, 'director')].path | [0]"
+            node: "[?contains(path, 'node')].path | [0]"
+          loop:
+            - name: "eccd-{{ ccd_version }}-director"
+              file: "{{ images.files | to_json | from_json | json_query(director) }}"
+            - name: "eccd-{{ ccd_version }}-node"
+              file: "{{ images.files | to_json | from_json | json_query(node) }}"
+      when: result.results[0].images == [] or result.results[1].images == []

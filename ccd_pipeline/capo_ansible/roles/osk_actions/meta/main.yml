@@ -1,0 +1,7 @@
+---
+dependencies:
+  - role: utils_deployment_vars
+    vars:
+      add_vars:
+        - minio
+    when: minio_vars_assigned is not defined or not minio_vars_assigned

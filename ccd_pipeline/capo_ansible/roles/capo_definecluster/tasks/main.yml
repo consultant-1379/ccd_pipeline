@@ -1,0 +1,8 @@
+  #Role to Define CAPO cluster configuration for deploymet_id
+---
+- name: Set ccdadm executable path variable
+  set_fact:
+    ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+- name: Define CAPO cluster configuration for {{ deployment_id }}
+  command: "{{ ccdadm_bin }} cluster define -n {{ deployment_id }} -c /tmp/{{ deployment_id }}.env.yml --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"

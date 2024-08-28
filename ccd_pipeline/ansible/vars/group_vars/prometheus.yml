@@ -1,0 +1,4 @@
+---
+url_prefix: prom
+url_domain: stsoss.sero.gic.ericsson.se
+ccd_list_file: ccd-list.json

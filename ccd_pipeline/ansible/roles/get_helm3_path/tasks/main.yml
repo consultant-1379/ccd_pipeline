@@ -1,0 +1,33 @@
+---
+# Check for helm3 path and set to variable: helm_path
+#
+# Supports environments where both helm 2 and 3 are installed or only helm 3
+# is installed. Does not support environments where only helm 2 is installed.
+#
+# If the helm3 binary exists we assume helm 2 is the primary, otherwise we
+# point to the standard helm path.
+
+- name: Check if helm binary exists
+  stat:
+    path: "{{ helm_binary }}"
+  register: helm
+
+- name: Check if helm3 binary exists
+  stat:
+    path: "{{ helm3_binary }}"
+  register: helm3
+
+- name: Set helm 3 path to {{ helm3_binary }}
+  set_fact:
+    helm_path: "{{ helm3_binary }}"
+  when: helm3.stat.exists
+
+- name: Set helm 3 path to {{ helm_binary }}
+  set_fact:
+    helm_path: "{{ helm_binary }}"
+  when: helm_path is undefined and helm.stat.exists
+
+- name: Fail if no helm binary found
+  fail:
+    msg: Helm binary not found at {{ helm_binary }} or {{ helm3_binary }}
+  when: helm_path is undefined

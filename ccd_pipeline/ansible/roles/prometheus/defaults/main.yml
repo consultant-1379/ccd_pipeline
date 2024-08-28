@@ -1,0 +1,5 @@
+---
+prometheus_yaml: prometheus.yml
+prometheus_url_prefix: prom
+prometheus_url_domain: stsoss.sero.gic.ericsson.se
+prometheus_ccd_list_file: ccd-list.json

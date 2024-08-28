@@ -1,0 +1,21 @@
+---
+# Get Prometheus server details and add as host
+# Server IP can be accessed using {{ prometheus_conf.prometheusvip }}
+
+- name: Download {{ prometheus_yaml }} from Minio
+  include_role:
+    name: creds
+  vars:
+    name: prometheus_conf
+    file: "{{ prometheus_yaml }}"
+
+- name: Add Prometheus host
+  add_host:
+    name: "{{ prometheus_conf.prometheusvip }}"
+    groups: prometheus
+    ansible_ssh_user: "{{ prometheus_conf.user }}"
+    ansible_ssh_pass: "{{ prometheus_conf.pass }}"
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+    url_prefix: "{{ prometheus_url_prefix }}"
+    url_domain: "{{ prometheus_url_domain }}"
+    ccd_list_file: "{{ prometheus_ccd_list_file }}"

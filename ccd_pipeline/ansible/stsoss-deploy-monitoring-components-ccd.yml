@@ -1,0 +1,253 @@
+---
+- name: monitoring
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    # Variable for stsoss-cni-prometheus local
+    external_label_default:
+      declname: "{{ deployment_id }}"
+      declname: "{{ site_name }}"
+  roles:
+    - deployment_id
+    - get_helm3_path
+    - get_kube_config
+
+  tasks:
+    - name: Set stsoss-cni-prometheus External Labels 
+      block:
+        - name: "Get Deployment '{{ deployment_id }}' from DTT"
+          include_role:
+            name: dtt
+
+        - name: "Get Deployment '{{ deployment_id }}' Program ID from DTT Deployment"
+          set_fact:
+            programid: "{{ dtt_deployment.program_id }}"
+          when: dtt_deployment.program_id is defined
+
+        # Get and Set Program ID for CCD Deployment in stsoss-cni Prometheus External Label
+        - name: "Translate Deployment '{{ deployment_id }}' Program ID '{{ programid }}' to Program Name"
+          uri:
+            method: GET
+            url: "{{ dtt_url }}/api/programs/{{ programid }}"
+            return_content: yes
+            status_code: 200
+          register: get_program_name
+          until: get_program_name.json and get_program_name.json._id == programid
+          retries: 1
+          delay: 3
+          when: programid is defined
+
+        - name: Save DTT Deployment '{{ deployment_id }}' Program Name Variable
+          set_fact:
+            program_name: "{{ get_program_name.json.name }}"
+          when: get_program_name is defined
+
+        - name: "Add Program Name '{{ program_name }}' to stsoss-cni-prometheus External Labels for Deployment '{{ deployment_id }}' "
+          set_fact:
+            external_label_default: "{{ external_label_default | combine( {'program':  program_name   }) }}"
+          when: program_name is defined
+
+    # Create stsoss-cni-monitoring namespace
+    - name: Create stsoss-cni-monitoring namespace
+      k8s:
+        name: stsoss-cni-monitoring
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    - name: Deploy Eventrouter to stsoss-cni-monitoring namespace
+      include_role:
+        name: deploy_eventrouter
+      vars:
+        namespace: stsoss-cni-monitoring
+        release_name: stsoss-cni-eventrouter
+        elastic_url: http://ieatcnevelk1.athtem.eei.ericsson.se:9200
+
+    - name: Get etcd certs from monitoring namespace
+      k8s_info:
+        kind: Secret
+        api_version: v1
+        namespace: monitoring
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: etcd-certs
+      register: etcd_certs
+
+    - name: Create etcd certs in stsoss-cni-monitoring namespace
+      k8s:
+        state: present
+        api_version: v1
+        kind: Secret
+        namespace: stsoss-cni-monitoring
+        name: etcd-certs
+        kubeconfig: "{{ kubeconfig_path }}"
+        resource_definition:
+          type: Opaque
+          data: "{{ etcd_certs.resources[0].data }}"
+
+    - name: Get master nodes
+      k8s_info:
+        kind: Node
+        api_version: v1
+        kubeconfig: "{{ kubeconfig_path }}"
+        label_selectors:
+          - node-role.kubernetes.io/master
+      register: nodes
+
+    - name: Get master internal IPs
+      set_fact:
+        master_ips: "{{ query('flattened', nodes.resources | json_query('[].status.addresses[?(@.type==`InternalIP`)].address')) }}"
+
+    - name: "Check if {{ deployment_id }} is a baremetal or VMware deployment"
+      set_fact:
+        is_baremetal: '{{ deployment_id | regex_search("^bmccd\d+") is not none  }}'
+        is_vmware: '{{ deployment_id | regex_search("^ccd-p[a-z]\d+") is not none  }}'
+
+    - debug:
+        msg: 'Deployment {{ deployment_id }} is a {{ "baremetal" if is_baremetal else ( "VMware" if is_vmware else "" ) }} CCD deployment'
+      when: is_baremetal or is_vmware
+
+    - name: Run enable metrics playbook in CCD
+      include_role:
+        name: run_on_director
+      vars:
+        ccd_playbook: master-enable-metrics.yml
+      when: not is_baremetal and not is_vmware
+
+    - name: Add helm3 prometheus-community repo
+      kubernetes.core.helm_repository:
+        binary_path: "{{ helm_path }}"
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+      tags:
+        - skip_ansible_lint
+
+    - name: Install STSOSS-CNI Prometheus on CCD cluster
+      kubernetes.core.helm:
+        binary_path: "{{ helm_path }}"
+        name: stsoss-cni-prometheus
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: 12.2.3
+        namespace: stsoss-cni-monitoring
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        values:
+          alertmanager:
+            enabled: false
+          grafana:
+            image:
+              repository: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/grafana/grafana
+            sidecar:
+              image:
+                repository: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/kiwigrid/k8s-sidecar
+            ingress:
+              enabled: true
+              hosts:
+#                - grafana.{{ dtt_name }}.stsoss.sero.gic.ericsson.se
+                - grafana.{{ dtt_name }}.stsoss.{{ site_name }}.gic.ericsson.se
+          prometheus:
+            ingress:
+              enabled: true
+              hosts:
+                - prom.{{ dtt_name }}.stsoss.{{ site_name }}.gic.ericsson.se
+#                - prom.{{ dtt_name }}.stsoss.sero.gic.ericsson.se
+#                - prom.{{ deployment_id }}.stsoss.sero.gic.ericsson.se
+            prometheusSpec:
+              # ExternalLabels is defined as a Global Variable.
+              externalLabels:
+                 "{{ external_label_default }}"
+              retention: 3d
+              secrets:
+                - etcd-certs
+              image:
+                repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/prometheus/prometheus
+          kube-state-metrics:
+            image:
+              repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/coreos/kube-state-metrics
+          prometheus-node-exporter:
+            image:
+              repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/prometheus/node-exporter
+            service:
+              port: 9186
+              targetPort: 9186
+            nodeExporterImage:
+              repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/prometheus/node-exporter
+          prometheusOperator:
+            admissionWebhooks:
+              patch:
+                 image:
+                  repository: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/jettech/kube-webhook-certgen
+            configmapReloadImage:
+              repository: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/jimmidyson/configmap-reload
+            image:
+              repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/prometheus-operator/prometheus-operator
+            prometheusConfigReloaderImage:
+              repository: armdocker.rnd.ericsson.se/quay-ericsson-remote/prometheus-operator/prometheus-config-reloader
+            createCustomResource: false
+            enabled: true
+          kubeEtcd:
+            endpoints: "{{ master_ips }}"
+            service:
+              port: 2379
+              targetPort: 2379
+            serviceMonitor:
+              scheme: https
+              insecureSkipVerify: true
+              caFile: /etc/prometheus/secrets/etcd-certs/etcd-ca
+              certFile: /etc/prometheus/secrets/etcd-certs/etcd-cert
+              keyFile: /etc/prometheus/secrets/etcd-certs/etcd-key
+          kubeControllerManager:
+            service:
+              port: 10257
+              targetPort: 10257
+            serviceMonitor:
+              https: true
+              insecureSkipVerify: true
+          kubeScheduler:
+            service:
+              port: 10259
+              targetPort: 10259
+            serviceMonitor:
+              https: true
+              insecureSkipVerify: true
+      tags:
+        - skip_ansible_lint
+
+    # Update metricsBindAddress of ConfigMap kube-proxy
+    - name: Get current configuration of ConfigMap kube-proxy
+      k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: kube-proxy
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: configmap_output
+
+    - name: Apply the changes to ConfigMap kube-proxy
+      k8s:
+        state: present
+        resource_definition: "{{ configmap_output.resources|replace('[::1]:10249', '0.0.0.0:10249') }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    # Delete the pods with label "k8s-app=kube-proxy" to make the changes effective
+    - name: Get pod list with label "k8s-app=kube-proxy"
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+        label_selectors:
+          - k8s-app=kube-proxy
+      register: pod_list
+
+    - name: Delete the pods with label "k8s-app=kube-proxy"
+      k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: "{{ item }}"
+      with_items:
+        - "{{ pod_list.resources | map(attribute='metadata.name') | list }}"

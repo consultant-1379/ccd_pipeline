@@ -1,0 +1,78 @@
+---
+# Playbook to Update the staging CAPO target deployment flavor template.
+# The value of ccd_version is changed/updated with the value of staging_version.
+# Value of staging_version is retrieved from Deployment DTT entry.
+# This playbook is used as part of the staging pipeline.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook staging-version-flavor-template.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook staging-version-flavor-template.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Change the target deployment flavor template ccd_version with the staging_version
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: dtt
+  tasks:
+    - name: Set CCD Flavor & Staging Version from Deployment DTT
+      set_fact:
+        ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(flavor_qry) | first }}"
+        ccd_staging_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(staging_version_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        flavor_qry: "[? key_name == 'ccdFlavor'].key_value"
+        staging_version_qry: "[? key_name == 'staging_version'].key_value"
+
+    - name: Assert that ccd_flavor_name is defined from Deployment DTT
+      assert:
+        that:
+          - ccd_flavor_name is defined
+          - ccd_staging_version is defined
+        fail_msg:
+          - "Either:"
+          - "Flavor could not be set from DTT target deployment {{ dtt_name }}"
+          - "or"
+          - "Staging Version could not be set from DTT target deployment {{ dtt_name }}"
+          - "Please Verify. Exiting Playbook!"
+
+    - name: Get CCD Flavor Template file from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: get
+        ignore_nonexistent_bucket: True
+        dest: /tmp/{{ ccd_flavor_name }}.template.yml
+
+    - name: Update CCD Version in CCD Flavor Template file
+      replace:
+        path: /tmp/{{ ccd_flavor_name }}.template.yml
+        regexp: 'ccd_version:.*'
+        replace: 'ccd_version: {{ ccd_staging_version }}'
+
+    - name: Update {{ ccd_flavor_name }}.template.yml in MinIO bucket
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        src: /tmp/{{ ccd_flavor_name }}.template.yml
+        mode: put
+        ignore_nonexistent_bucket: True
+
+    - name: Delete {{ ccd_flavor_name }}.template.yml file
+      file:
+        path: /tmp/{{ ccd_flavor_name }}.template.yml
+        state: absent

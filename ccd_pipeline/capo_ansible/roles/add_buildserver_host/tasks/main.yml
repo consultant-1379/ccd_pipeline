@@ -1,0 +1,25 @@
+---
+# Get build server access details from Minio
+# Host is added using build_server_ip
+# Input variable(s):
+#   use_upgrade_build_server - Optional flag to add upgrade build server instead of main build server
+
+- name: Get build server details
+  include_role:
+    name: creds
+  vars:
+    name: build_server_vars
+    file: "{{ 'upgrade_build_server.yml' if use_upgrade_build_server is defined and use_upgrade_build_server is true else 'build_server.yml' }}"
+
+- name: Set build server IP
+  set_fact:
+    build_server_ip: "{{ build_server_vars.build_server_ip }}"
+
+- name: Add build server host
+  no_log: yes
+  add_host:
+    name: "{{ build_server_ip }}"
+    ansible_ssh_user: "{{ build_server_vars.build_server_username }}"
+    ansible_ssh_pass: "{{ build_server_vars.build_server_password }}"
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+    ansible_remote_tmp: "{{ capo_build_ansible_tmp }}"

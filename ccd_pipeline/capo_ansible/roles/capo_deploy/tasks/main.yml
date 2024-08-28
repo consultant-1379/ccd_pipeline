@@ -1,0 +1,11 @@
+#Role to Deploy CAPO cluster for deploymet_id
+---
+- name: Set ccdadm executable path variable
+  set_fact:
+    ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+- name: Deploy CAPO cluster for {{ deployment_id }}
+  #command: "{{ ccdadm_bin }} cluster deploy --configdir {{ ccdadm_dir }}/{{ deployment_id }}/ --debug"
+
+  #  new param --swPackage added in predrop 1 2.27.0-000983-3ed26aff
+  command: "{{ ccdadm_bin }} cluster deploy --swPackage {{ ccdadm_dir }}/ --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"

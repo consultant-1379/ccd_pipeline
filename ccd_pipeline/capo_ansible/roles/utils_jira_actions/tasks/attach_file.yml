@@ -1,0 +1,43 @@
+---
+- name: Role Requirement, Ensure `jira_ticket` & `attachment` defined
+  assert:
+    that:
+      - jira_ticket is defined
+      - attachment is defined
+    fail_msg:
+      - "Required vars `jira_ticket` & `attachment` not defined."
+      - "Example:"
+      - "jira_ticket: CIS-123456"
+      - "attachment: /path/to/attachment/file"
+      - "Example - jira_ticket: CIS-123456"
+      - "Exiting playbook!"
+    success_msg: "Required vars defined."
+
+# "'attachment' is documented as being available on our ansible version."
+# "But for some reason the below task fails with Unsupported parameter error."
+# "Can be investigated in future."
+# "Keeping task & file here anyway."
+#
+# - name: Attach a File to JIRA Issue
+#   jira:
+#     uri: '{{ jira_module_url }}'
+#     username: '{{ jira_username }}'
+#     password: '{{ jira_password }}'
+#     issue: "{{ jira_ticket }}"
+#     operation: attach
+#     attachment:
+#       filename: "{{ attachment }}"
+#   register: attach_result
+
+# Needed to use commadnd module as I couldnt get uri to work correctly.
+# The file would get encoded on upload which is not the wanted behaviour.
+# Seems to be an issue/limitation with the uri module:
+# https://github.com/ansible/ansible/issues/73621
+#
+- name: Attach a File to JIRA Issue
+  command: curl --location --request POST '{{ jira_url }}{{ jira_ticket }}/attachments' -u '{{ jira_username }}:{{ jira_password }}' -H 'X-Atlassian-Token:no-check' --form 'file=@"{{ attachment }}"'
+  register: attach_result
+
+- name: Set the JIRA Attach Result
+  set_fact:
+    jira_attach_result: "{{ attach_result }}"

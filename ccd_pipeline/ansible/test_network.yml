@@ -1,0 +1,180 @@
+
+---
+-
+  gather_facts: false
+  hosts: localhost
+  vars:
+    dit_url: http://atvdit.athtem.eei.ericsson.se
+  roles:
+    - dtt
+
+  tasks:
+
+    - name: Get DIT Project Link from DTT Deployments CCD Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: '{{ dit_project_link }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: '{{ get_dit_project.json }}'
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: '{{ dit_url }}/api/pods/{{ dit_project.pod_id }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Cloud as variable
+      set_fact:
+        dit_pod: '{{ get_dit_pod.json }}'
+      
+    - name: Check for DTT Traffic Network end user selection
+      set_fact:
+        workers_network_selection: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'networkTraffic'].key_value"
+##      ignore_errors: yes
+
+    - name: Check for DTT OAM Network end user selection
+      set_fact:
+        directors_network_selection: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'networkOAM'].key_value"
+
+    - name: Check DTT Traffic Network value
+      when: workers_network_selection is defined
+      fail:
+        msg: "{{ workers_network_selection }} not a valid entry for DTT Workers Network"
+##      when: " 'ProviderNetwork-' not in workers_network_selection"
+      when: "not workers_network_selection.startswith('ProviderNetwork-')"
+
+    - name: Check DTT OAM Network value
+      when: directors_network_selection is defined
+      fail:
+        msg: "{{ directors_network_selection }} not a valid entry for DTT OAM Network"
+      when: "not directors_network_selection.startswith('ProviderNetwork-')"
+
+    - name: Download openstack credentials from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: tools
+        object: openstack_creds.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: openstack_access
+
+    - name: Import variables from openstack creds file
+      #no_log: yes
+      set_fact:
+        openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+
+    - name: Set openstack username and password vars from openstack creds var
+      #no_log: yes
+      set_fact:
+        openstack_user: "{{ openstack_access_vars.openstack_user }}"
+        openstack_password: "{{ openstack_access_vars.openstack_password }}"
+
+    - name: "Check cloud for existing Traffic network"
+      openstack.cloud.networks_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        name: "{{ workers_network_selection }}" 
+      register: result
+
+#    - name: Show openstack network
+#      debug:
+#        msg: "{{ result.openstack_networks }}"
+
+    - name: Show openstack traffic network ID
+      debug:
+        msg: "{{ result.openstack_networks.0.id }}"
+
+    - name: "Check cloud for existing Traffic subnet"
+      openstack.cloud.subnets_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        name: "{{ workers_network_selection }}-IPv4"
+      register: result
+
+    - name: Show openstack Traffic subnet ID
+      debug:
+        msg: "{{ result.openstack_subnets.0.id }}"
+
+    - name: Show openstack Traffic subnet GW
+      debug: 
+        msg: "{{ result.openstack_subnets.0.gateway_ip }}"
+
+    - name: "Check cloud for existing OAM network"
+      openstack.cloud.networks_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        name: "{{ directors_network_selection }}"
+      register: result
+
+    - name: Show openstack oam network ID
+      debug:
+        msg: "{{ result.openstack_networks.0.id }}"
+
+    - name: "Check cloud for existing OAM subnet"
+      openstack.cloud.subnets_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        name: "{{ directors_network_selection }}-IPv4"
+      register: result
+
+    - name: Show openstack OAM subnet ID
+      debug:
+        msg: "{{ result.openstack_subnets.0.id }}"
+
+    - name: Show openstack OAM subnet GW
+      debug:
+        msg: "{{ result.openstack_subnets.0.gateway_ip }}"
+
+        

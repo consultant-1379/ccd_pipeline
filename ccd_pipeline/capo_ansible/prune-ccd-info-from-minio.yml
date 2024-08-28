@@ -1,0 +1,29 @@
+##   ansible-playbook prune-ccd-info-from-minio.yml -e deployment_id={ccd deployment id}
+---
+- name: Prune relevant infomation from MinIO before CCD re-install
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  roles:
+    - deployment_id
+  tasks:
+    - name: List objects in folder {{ deployment_id }}
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        prefix: ccd/{{ deployment_id | mandatory }}
+        mode: list
+      register: key_list
+
+    - name: Prune objects in folder {{ deployment_id }}
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: "{{ item }}"
+        mode: delobj
+      loop: "{{ key_list.s3_keys }}"
+      when: "'env' not in item"

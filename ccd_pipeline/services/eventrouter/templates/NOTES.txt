@@ -1,0 +1,3 @@
+Eventrouter with Elasticsearch sink deployed with the following configuration:
+
+{{ .Values.config | toPrettyJson }}

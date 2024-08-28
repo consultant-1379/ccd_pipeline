@@ -1,0 +1,17 @@
+---
+# Defaults can be overriden when including this role in a play
+project: CIS
+issue_type: Support
+priority: Minor
+pdg_area: DE
+sub_area_team: DE-CNI
+site_location: Athlone
+components:
+  - name: DE-CloudNative
+summary: Ansible Generated JIRA
+description: |
+  This is a Dummy JIRA
+  created by ansible.
+comment: |
+  This is a Dummy comment
+  created by ansible.

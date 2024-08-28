@@ -1,0 +1,36 @@
+---
+- name: Role Requirement, Ensure `deployed_image_path` & `upgrade_image_path` & `upgrade_image_bin` Defined
+  assert:
+    that:
+      - deployed_image_path is defined
+      - upgrade_image_path is defined
+      - upgrade_image_bin is defined
+    fail_msg:
+      - "Required vars `deployed_image_path` & `upgrade_image_path` & `upgrade_image_bin` must be defined."
+      - "Example:"
+      - "deployed_image_path: /ccd/IMAGES/capo-2.26.0-000393-fc474230"
+      - "upgrade_image_path: /ccd/IMAGES/capo-2.27.0-001354-13a570c4"
+      - "upgrade_image_bin: /ccd/IMAGES/capo-2.27.0-001354-13a570c4/bin/ccdadm"
+      - "Exiting playbook!"
+    success_msg: "Required vars defined."
+
+- name: Cluster Upgrade Plan
+  command: "{{ upgrade_image_bin }} cluster upgrade plan {{ config_dir }} {{ config_file }} --swPackage {{ upgrade_image_path }}"
+
+- name: Cluster Config Validate
+  command: "{{ upgrade_image_bin }} cluster config validate-upgrade {{ config_dir }} {{ config_file }}"
+
+- name: Cluster Upgrade Init
+  command: "{{ upgrade_image_bin }} cluster upgrade init {{ config_dir }} {{ config_file }} --swPackage {{ upgrade_image_path }} --debug"
+
+- name: Cluster Upgrade Controlplane
+  command: "{{ upgrade_image_bin }} cluster upgrade controlplane {{ config_dir }} --wait --debug"
+
+- name: Cluster Upgrade Workerpool
+  command: "{{ upgrade_image_bin }} cluster upgrade workerpool --name worker {{ config_dir }} --wait --debug"
+
+- name: Cluster Upgrade Addons
+  command: "{{ upgrade_image_bin }} cluster upgrade addons {{ config_dir }} --debug"
+
+- name: Cluster Upgrade Finalize
+  command: "{{ upgrade_image_bin }} cluster upgrade finalize {{ config_dir }} --debug"

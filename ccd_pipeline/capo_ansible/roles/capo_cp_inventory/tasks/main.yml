@@ -1,0 +1,14 @@
+---
+- name: Add tasks to create vip_node Host Group
+  include_tasks: add_vip_node.yml
+  when: "'vip_node' in add_group"
+
+- name: Add tasks to create cp_nodes Host Group
+  include_tasks: add_cp_nodes.yml
+  when: "'cp_nodes' in add_group"
+
+- name: Generate Key File for ControlPlane Node Access
+  copy:
+    dest: "{{ pem_location }}"
+    mode: '0600'
+    content: "{{ deployment_pem }}"

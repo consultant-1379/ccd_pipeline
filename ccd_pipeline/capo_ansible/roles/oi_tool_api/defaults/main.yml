@@ -1,0 +1,14 @@
+---
+# Defaults can be overwritten when including this role in a play
+method: GET
+body_format: form-urlencoded
+return_content: yes
+validate_certs: no
+
+# API Retry vars for when Hydra is down/unreachable
+# 30 second delay is to allow time for Hydra to recover
+api_retries: 4
+api_delay: 30
+
+# API Parameters
+oi_params: {}

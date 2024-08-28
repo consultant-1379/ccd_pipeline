@@ -1,0 +1,149 @@
+---
+#~# Playbook to Generate CCD Deploy config for VMware
+
+- name: Generate CCD Deploy config for VMware
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    minio_bucket:
+      ipaddr: cloud # Bucket where ipplan & vcenter_env is located
+      config: ccd # Bucket to deploy the generated config files
+      templates: templates # Bucket where vcenter templates (j2) are located
+    ip_plan_file: podb-ipplan.csv
+    deploy_vsphere_env: podb-vcenter_env.yml
+    #~# tmp var
+    cluster: POD-B-CCD-Cluster1
+  roles:
+    - deployment_id
+
+  tasks:
+    - name: Pull down {{ ip_plan_file }} & {{ deploy_vsphere_env }} from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "{{ minio_bucket.ipaddr }}"
+        object: "{{ item }}"
+        dest: /tmp/{{ item }}
+        mode: get
+      loop:
+        - "{{ ip_plan_file }}"
+        - "{{ deploy_vsphere_env }}"
+
+    - name: Pull down template files from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "{{ minio_bucket.templates }}"
+        object: "/vcenter/{{ item }}"
+        # object: "/vcenter/test_area/{{ item }}"
+        dest: /tmp/{{ item }}
+        mode: get
+      loop:
+        - "inventory.j2"
+        - "parameters.yml.j2"
+
+    - name: Include retrieved {{ deploy_vsphere_env }}
+      include_vars: /tmp/{{ deploy_vsphere_env }}
+
+    - name: Parse {{ ip_plan_file }}
+      read_csv:
+        path: /tmp/{{ ip_plan_file }}
+        fieldnames: hostname,ip_address
+        delimiter: ','
+      register: ip_addresses
+
+    - name: Find {{ deployment_id }} Master IP Addresses
+      set_fact:
+        master_ips: "{{ master_ips | default([]) + [ item.ip_address ] }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(master_query) }}"
+      vars:
+        master_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'master')] | [?!contains(hostname, 'vip')]"
+
+    - name: Find {{ deployment_id }} Worker IP Addresses
+      set_fact:
+        worker_ips: "{{ worker_ips | default([]) + [ item.ip_address ] }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(worker_query) }}"
+      vars:
+        worker_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'worker')]"
+
+    - name: Find {{ deployment_id }} ECFE IP Addresses
+      set_fact:
+        ecfe_ips: "{{ ecfe_ips | default([]) + [ item.ip_address ] }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(ecfe_query) }}"
+      vars:
+        ecfe_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'ecfe')]"
+
+    - name: Find {{ deployment_id }} VIP IP Address
+      set_fact:
+        vip_ip: "{{ item.ip_address }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(vip_query) }}"
+      vars:
+        vip_query: "[?contains(hostname, '{{ deployment_id }}')] | [?contains(hostname, 'vip')]"
+
+    - name: Find PodB GGN VRouter IP Address
+      set_fact:
+        vrouter_ip: "{{ item.ip_address }}"
+      loop: "{{ ip_addresses.list | to_json | from_json | json_query(vrouter_query) }}"
+      vars:
+        vrouter_query: "[?hostname=='podb-vrouter-ggn']"
+
+    - name: Set the vcenter cluster {{ cluster }} vars
+      set_fact:
+        vcenter_cluster: "{{ cluster }}"
+        vcenter_datastore: "{{ deploy_vsphere_clusters[cluster].apps | select('match', '.*' + '_PV0' + deployment_id[-1] + '.*') | list | first }}"
+      when: "cluster in deploy_vsphere_clusters"
+
+    - name: Fail if Required Vars Missing
+      fail:
+        msg: >
+          Could not locate all required vars for Config Generation.
+          Please Verify deployment_id[{{ deployment_id }}], cluster[{{ cluster }}] & {{ ip_plan_file }}
+      when: >
+        (master_ips is not defined or master_ips|length<1) or
+        (worker_ips is not defined or worker_ips|length<1) or
+        (ecfe_ips is not defined or ecfe_ips|length<1) or
+        (vip_ip is not defined or vip_ip|length<1) or
+        (vrouter_ip is not defined or vrouter_ip|length<1) or
+        (vcenter_cluster is not defined or vcenter_cluster|length<1) or
+        (vcenter_datastore is not defined or vcenter_datastore|length<1)
+
+    - name: Generate {{ deployment_id }} Inventory & Parameters files
+      template:
+        src: /tmp/{{ item }}.j2
+        dest: /tmp/{{ deployment_id }}.{{ item }}
+        mode: '0666'
+      loop:
+        - "inventory"
+        - "parameters.yml"
+
+    - name: Upload Generated files to MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: de-cni
+        object: /{{ minio_bucket.config }}/{{ deployment_id }}/{{ item }}
+        src: /tmp/{{ item }}
+        mode: put
+      loop:
+        - "{{ deployment_id }}.inventory"
+        - "{{ deployment_id }}.parameters.yml"
+
+    - name: Cleanup & Delete local temp files
+      file:
+        path: /tmp/{{ item }}
+        state: absent
+      loop:
+        - "{{ ip_plan_file }}"
+        - "{{ deploy_vsphere_env }}"
+        - "inventory.j2"
+        - "parameters.yml.j2"
+        - "{{ deployment_id }}.inventory"
+        - "{{ deployment_id }}.parameters.yml"
+
+#~# End Playbook
+...

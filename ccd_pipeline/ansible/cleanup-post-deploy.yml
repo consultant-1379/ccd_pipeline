@@ -1,0 +1,12 @@
+## Partial Auotomated Playbook for non-cENM CCD Post Installation Cleanup
+
+## Default (CCD flavor must be ready): playbook will check if cluster is cENM from CCD flavor
+##   ansible-playbook cleanup-post-deploy.yml -e deployment_id={ccd deployment id}
+## cleanup non-cENM CCD post installation steps
+##   ansible-playbook cleanup-post-deploy.yml -e deployment_id={ccd deployment id} -e is_cenm=false
+## cleanup cENM CCD post installation steps
+##   ansible-playbook cleanup-post-deploy.yml -e deployment_id={ccd deployment id} -e is_cenm=true
+
+---
+- import_playbook: delete-ccd-from-prom.yml
+- import_playbook: cleanup-monitoring-components.yml

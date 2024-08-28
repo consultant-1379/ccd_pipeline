@@ -1,0 +1,16 @@
+---
+# Role to install K8set helm chart and get results
+# Required variables:
+#   <none>
+# Optional variables:
+#   release_name
+#   namespace
+
+- name: Uninstall K8set if required
+  include_tasks: uninstall.yml
+
+- name: Install K8set
+  include_tasks: install.yml
+
+- name: Get K8set results
+  include_tasks: results.yml

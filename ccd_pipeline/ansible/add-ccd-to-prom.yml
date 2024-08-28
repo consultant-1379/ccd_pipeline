@@ -1,0 +1,83 @@
+---
+- import_playbook: get-prod-promtheus-ip.yml
+- name: Add CCD target to prometheus
+  hosts: prometheus
+  vars_files: vars/group_vars/prometheus.yml
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ccd_url: "{{ url_prefix }}.{{ deployment_id }}.{{ url_domain }}"
+
+  tasks:
+    - name: Get a list of existing active targets from prometheus API
+      uri:
+        url: http://{{ ansible_default_ipv4.address }}:9090/api/v1/targets
+        method: GET
+        return_content: yes
+        status_code: 200
+        body_format: json
+      register: result
+      retries: 1
+      delay: 1
+
+    - name: Store list of current active targets  in fact activeTargets
+      set_fact: activeTargets={{ result | json_query('json.data.activeTargets[].discoveredLabels.__address__') }}
+
+    - name: "set fact ccd_active to yes if {{ ccd_url }} is in  fact activeTargets"
+      set_fact:
+        ccd_active: yes
+      when: ccd_url  in  activeTargets
+
+    - name: "set fact ccd_active to no if {{ ccd_url }} is in  fact activeTargets"
+      set_fact:
+        ccd_active: no
+      when: ccd_url  not in  activeTargets
+
+    - name: Print debug to show if the {{ ccd_url }} already in activeTargets
+      debug:
+        msg: "CCD already in prometheus ?  {{ ccd_active | string }} "
+
+    - name: Add ccd prometheus URL to ccd-list.conf file
+      lineinfile:
+        path: /etc/prometheus/{{ ccd_list_file }}
+        insertbefore: "]"
+        line: ',{ "targets": [ "{{ url_prefix }}.{{ deployment_id }}.{{ url_domain }}" ] } '
+      register: target_add_result
+      when: not ccd_active
+
+    - name: Print debug message when {{ ccd_list_file }} has been updated
+      debug:
+        msg: "{{ target_add_result.changed }}, {{ target_add_result.msg }} to /etc/prometheus/{{ ccd_list_file }}"
+      when: not ccd_active
+
+    - name: sleep for 5 seconds to allow file_sd in prometheus to pick up change to {{ ccd_list_file }}
+      wait_for:
+        timeout: 5
+      when: not ccd_active
+
+    - name: Check if ccd  target has been added to  in prometheus active targets
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}:9090/api/v1/targets"
+        method: GET
+        return_content: yes
+        status_code: 200
+        body_format: json
+      register: result
+      retries: 1
+      delay: 1
+
+    - name: Capture list of current active targets  in fact activeTargets
+      set_fact: activeTargets={{ result | json_query('json.data.activeTargets[].discoveredLabels.__address__') }}
+
+    - name: set fact "ccd_added" to yes if {{ ccd_url }} is in  fact activeTargets
+      set_fact:
+        ccd_added: yes
+      when: ccd_url  in  activeTargets
+
+    - name: set fact "ccd_added" to no if {{ ccd_url }} is in  fact activeTargets
+      set_fact:
+        ccd_added: no
+      when: ccd_url  not in  activeTargets
+
+    - debug:
+        msg: "Is CCD target a current activeTarget?  {{ ccd_added | string }} "
+      failed_when: not ccd_added

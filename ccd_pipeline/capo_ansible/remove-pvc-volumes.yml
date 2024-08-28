@@ -1,0 +1,100 @@
+---
+#   PVCs deleteion for capo cluster
+#   delete kubernetes CSI driver based volumes 
+#   Volumes should have status available
+#   fail if deployment_id e.g ccd-c10a001 not provided
+#
+- name: Delete volumes remaining after capo cluster delete for {{ deployment_id }}
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    # Import role, this role returns below variables that we can use in play
+    # proj_username  it privides project username
+    # proj_password  it provides project password
+    # proj_name      it provides project name
+    # proj_uuid      it provides project uuid
+    # cloud_auth_url it provides required clouds' authentication url
+    # user_domain    it has value 'default'
+    # proj_domain    it has value 'default'
+
+    - name: Import role 'project-info-dtt' to get project details from DTT
+      import_role:
+        name: project-info-dtt
+
+    # Retrieve cloud name from auth_url variable as it will be used in API calls.
+    # API endpoints has different port so we cannot use auth_url as it has port 13000 appended with cloud name
+    - name: Retrieve cloud Name from cloud Authentication URL
+      set_fact:
+        cloud_name: "{{ cloud_auth_url | regex_replace(':13000/v3') }}"
+
+    # Authenticate using openstack API with project scope and get authentication token
+    # It will be used to retrieve volume and keypair info through openstack API
+    # There is no ansible module to retrieve above info 
+    - name: Authenticating to cloud {{ cloud_name }}
+      uri:
+        method: POST
+        url: "{{ cloud_name }}:13000/v3/auth/tokens/"
+        body_format: json
+        body:
+          {
+            "auth": {
+              "identity": {
+                "methods": [
+                  "password"
+                ],
+                "password": {
+                  "user": {
+                    "name": "{{ proj_username }}",
+                    "domain": {
+                      "id": "default",
+                      "name": "default"
+                    },
+                    "password": "{{ proj_password }}"
+                  }
+                }
+              },
+              "scope": {
+                "project": {
+                  "id": "{{ proj_uuid }}"
+                }
+              }
+            }
+          }
+        return_content: yes
+        status_code: 201
+      register: authentication_result
+
+    # Retrieve the list of volulmes available in the project through openstack API
+    - name: Retrieving existing Volumes list
+      uri:
+        method: GET
+        url: "{{ cloud_name }}:13776/v3/{{ proj_uuid }}/volumes/detail"
+        headers:
+          Accept: application/json
+          X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+        return_content: yes
+        status_code: 200
+      register: volumes_list
+
+    #Filter volumes that has description 'Created by OpenStack Cinder CSI driver' and status available
+    - name: Filtering Volumes to fetch only that has description Cinder CSI driver and available status
+      set_fact:
+        csi_volumes: "{{ volumes_list.json | json_query(filter) }}"
+      vars:
+        filter: "volumes[?description == 'Created by OpenStack Cinder CSI driver']|[?status == 'available'].name"
+
+    # Delete all volumes created by Cinder CSI driver
+    - name: Deleting all volumes created by Cinder CSI driver
+      os_volume:
+        auth:
+          username: "{{ proj_username }}"
+          project_name: "{{ proj_name }}"
+          password: "{{ proj_password }}"
+          auth_url: "{{ cloud_auth_url }}"
+          user_domain_name: "{{ user_domain }}"
+          project_domain_name: "{{ proj_domain }}"
+        display_name: "{{ item }}"
+        state: absent
+      loop: "{{ csi_volumes }}"

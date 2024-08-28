@@ -1,0 +1,22 @@
+---
+# Role to install Eventrouter helm chart
+# Required variables:
+#   deployment_id
+# Optional variables:
+#   elastic_url
+#   namespace
+- name: Install Eventrouter
+  kubernetes.core.helm:
+    name: eventrouter
+    chart_ref: ../services/eventrouter
+    namespace: "{{ namespace }}"
+    binary_path: "{{ helm_path }}"
+    kubeconfig_path: "{{ kubeconfig_path }}"
+    state: present
+    values:
+      config:
+        sink: elastic
+        elasticURL: "{{ elastic_url }}"
+        elasticTag: "{{ deployment_id }}"
+  tags:
+    - skip_ansible_lint

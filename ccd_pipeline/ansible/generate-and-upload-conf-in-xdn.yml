@@ -1,0 +1,1011 @@
+---
+- name: Playbook to Generate the configuration required by CCD heat stack after transfering to xdn
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost,.athtem.eei.ericsson.se
+  vars:
+    total_ip_addresses_needed: 4
+    total_ip_addresses_needed_v6: 4
+  roles:
+    - deployment_id
+
+# Additional required vars to be added when calling script:
+# - deployment_id: Name of the Deployment
+
+# Please note that any of the predefined variables can be over-ridden when calling script:
+# Eg. Provide a different number of IP addresses needed as total_ip_addresses_needed
+  tasks:
+  - name: Generate the configuration file required by CCD heat stack
+    block:
+    - name: Create temp config directory
+      file:
+        path: ./tmp-files
+        state: directory
+    - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+      command: >
+        lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+      register: sftp_result
+      ignore_errors: yes
+    
+    - name: Parse JSON content
+      set_fact:
+        deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+    - name: Display the variable
+      debug:
+        var: deployment_data
+    
+    - name: Get IP_VERSION from DTT deployemnts API
+      set_fact:
+        ip_version: "{{ deployment_data.dtt_deployment.products[0].configuration | json_query('[?key_name==`ip_version`].key_value') | first  | default('ipv4') }}"
+
+    # IPV4 FACTS
+    - name: IPV4 vars
+      block:
+      - name: Calculate number of additional ECFE IPs needed
+        set_fact:
+          remaining_ip_addresses_needed: "{{ total_ip_addresses_needed - deployment_data.dit_project.network.ipv4_ranges|length }}"
+  
+      - name: Add ECFE IPs for Project in DIT
+        when: remaining_ip_addresses_needed|int > 0
+        block:
+        - name: Copy DIT Project Free Address JSON template file
+          copy:
+            src: json-files/dit-project-free-address-template.json
+            dest: json-files/{{ deployment_id }}-free-address.json
+          delegate_to: localhost
+  
+        - name: Insert Project Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address.json
+            regexp: 'PROJECT_NAME'
+            replace: '{{ deployment_data.dit_project.name }}'
+  
+        - name: Insert Network Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address.json
+            regexp: 'NETWORK_NAME'
+            replace: '{{ deployment_data.dit_project.network.name }}'
+  
+        - name: Insert Pod Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address.json
+            regexp: 'POD_NAME'
+            replace: '{{ deployment_data.dit_pod.name }}'
+  
+        - name: Insert Number of Addresses Needed to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address.json
+            regexp: '9999'
+            replace: '{{ remaining_ip_addresses_needed }}'
+  
+        - name: Save DIT Project Free Address JSON as Variable
+          set_fact:
+            deployment_free_address_json: "{{ lookup('file', 'json-files/{{ deployment_id }}-free-address.json') | from_json }}"
+  
+        # - name: Perform POST Call on DIT to retrieve the ECFE IPs
+        #   uri:
+        #     method: POST
+        #     url: "{{ dit_url }}/api/projects/free_address"
+        #     return_content: yes
+        #     status_code: 200
+        #     body: "{{ deployment_free_address_json }}"
+        #     body_format: json
+        #   register: post_projects_free_address
+        #   until: post_projects_free_address.json
+        #   retries: 1
+        #   delay: 3
+  
+        # - name: Save DIT Updated Project as variable
+        #   set_fact:
+        #       dit_project: "{{ post_projects_free_address.json }}"
+
+      - name: "Get ingressctrl loadbalancer ip for test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ deployment_data.dit_project_location }}.xgic.ericsson.se"
+        set_fact:
+          ingressctrl_loadbalancer_ip: "{{ lookup('dig', 'test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ deployment_data.dit_project_location }}.xgic.ericsson.se', 'qtype=A') }}"
+
+      - name: "Find ingressctrl loadbalancer in the {{ total_ip_addresses_needed }} IPv4 ranges of the projects network"
+        set_fact:
+          ingress_ip_found: "{{ deployment_data.dit_project.network.ipv4_ranges | json_query(ip_range_qry) }}"
+        vars:
+          ip_range_qry: "[? start == '{{ ingressctrl_loadbalancer_ip }}' ||  end == '{{ ingressctrl_loadbalancer_ip }}']"
+
+      - name: Verify Ingressctrl loadbalancer IP was found in the IPv4 ranges of the projects network
+        fail:
+          msg: Ingressctrl loadbalancer IP was not found in the IPv4 ranges of the projects network
+        when: ingress_ip_found == []
+
+      - name: Get list of ECFE pool CIDRs IPv4 range values
+        set_fact:
+          ecfe_pool_cidrs: "{{ ecfe_pool_cidrs|default([]) + [ item.start + '-' + item.end ] }}"
+        with_items: "{{ deployment_data.dit_project.network.ipv4_ranges }}"      
+      when: ip_version != "ipv6"
+
+# IPV6 FACTS
+    - name: IPV6 vars
+      block:
+      - name: Calculate number of additional ECFE IPs needed for ipv6
+        set_fact:
+          remaining_ip_addresses_needed_v6: "{{ total_ip_addresses_needed_v6 - deployment_data.dit_project.network.ipv6_ranges|length }}"
+  
+      - name: Add ECFE IPs for Project in DIT
+        when: remaining_ip_addresses_needed_v6 |int > 0
+        block:
+        - name: Copy DIT Project Free Address JSON template file
+          copy:
+            src: json-files/dit-project-free-address-template-ipv6.json
+            dest: json-files/{{ deployment_id }}-free-address-ipv6.json
+          delegate_to: localhost
+  
+        - name: Insert Project Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address-ipv6.json
+            regexp: 'PROJECT_NAME'
+            replace: '{{ deployment_data.dit_project.name }}'
+  
+        - name: Insert Network Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address-ipv6.json
+            regexp: 'NETWORK_NAME'
+            replace: '{{ deployment_data.dit_project.network.name }}'
+  
+        - name: Insert Pod Name to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address-ipv6.json
+            regexp: 'POD_NAME'
+            replace: '{{ deployment_data.dit_pod.name }}'
+  
+        - name: Insert Number of Addresses Needed to DIT Project Free Address JSON file
+          replace:
+            path: json-files/{{ deployment_id }}-free-address-ipv6.json
+            regexp: '9999'
+            replace: '{{ remaining_ip_addresses_needed_v6 }}'
+  
+        - name: Save DIT Project Free Address JSON as Variable
+          set_fact:
+            deployment_free_address_v6_json: "{{ lookup('file', 'json-files/{{ deployment_id }}-free-address-ipv6.json') | from_json }}"
+  
+        # - name: Perform POST Call on DIT to retrieve the ECFE IPs
+        #   uri:
+        #     method: POST
+        #     url: "{{ dit_url }}/api/projects/free_address"
+        #     return_content: yes
+        #     status_code: 200
+        #     body: "{{ deployment_free_address_v6_json }}"
+        #     body_format: json
+        #   register: post_projects_free_address_v6
+        #   until: post_projects_free_address_v6.json
+        #   retries: 1
+        #   delay: 3
+  
+        # - name: Save DIT Updated Project as variable
+        #   set_fact:
+        #     dit_project_v6: "{{ post_projects_free_address_v6.json }}"
+
+      - name: "Get ingressctrl loadbalancer ipv6 for test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ deployment_data.dit_project_location }}.xgic.ericsson.se"
+        set_fact:
+          ingressctrl_loadbalancer_ipv6: "{{ lookup('dig', 'test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ deployment_data.dit_project_location }}.xgic.ericsson.se', 'qtype=AAAA')  | custom_expand_ipv6  }}"
+         
+      - name: "Find ingressctrl loadbalancer in the {{ total_ip_addresses_needed }} IPv6 ranges of the projects network"
+        set_fact:
+          ingress_ip_found_v6: "{{ deployment_data.dit_project.network.ipv6_ranges  | json_query(ip_range_qry) }}"
+        vars:
+          ip_range_qry: "[? start == '{{ ingressctrl_loadbalancer_ipv6 }}' ||  end == '{{ ingressctrl_loadbalancer_ipv6 }}']"
+  
+      - name: Verify Ingressctrl loadbalancer IP was found in the IPv6 ranges of the projects network
+        fail:
+          msg: Ingressctrl loadbalancer IP was not found in the IPv6 ranges of the projects network
+        when: ingress_ip_found_v6 == []
+  
+      - name: Get list of ECFE pool CIDRs IPv6 range values
+        set_fact:
+          ecfe_pool_cidrs: "{{ ecfe_pool_cidrs|default([]) + [ item.start + '-' + item.end ] }}"
+        with_items: "{{ deployment_data.dit_project.network.ipv6_ranges }}"   
+
+      when: (ip_version == "ipv6") or (ip_version == "dual_stack")
+    
+    - name: Combine ingress IP from IV4 and IPV6 for dual stack
+      set_fact:
+        ingressctrl_loadbalancer_ip: "{{ ingressctrl_loadbalancer_ip | default('') }},{{ ingressctrl_loadbalancer_ipv6 | default('') }}"
+      when: ip_version == "dual_stack"
+    
+    - name: Ingress for IPV6
+      set_fact:
+        ingressctrl_loadbalancer_ip: "{{ ingressctrl_loadbalancer_ipv6 | default('') }}"
+      when: ip_version == "ipv6"
+
+    - name: Prepare Flavor Template Config File
+      block:
+      - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+        set_fact:
+          ccd_flavor_name: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+      - name: Get CCD Flavor Template file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: templates
+          object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.env.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: ccd_flavor_template
+
+      - name: Save Flavor Template as base config yml file
+        copy:
+          content: "{{ ccd_flavor_template.contents }}"
+          dest: tmp-files/{{ deployment_id }}.env.yml
+        delegate_to: localhost
+
+    - name: Prepare Cloud Template Config File
+      block:
+      - name: Get CCD Cloud Template file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: templates
+          object: /cloud/{{ deployment_data.dit_pod.name | lower }}.template.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: ccd_cloud_template
+
+      - name: Save Cloud Template as config yml file
+        copy:
+          content: "{{ ccd_cloud_template.contents }}"
+          dest: tmp-files/{{ deployment_id }}-cloud.env.yml
+        delegate_to: localhost
+
+    - name: Prepare Ansible Variables Config File
+      block:
+      - name: Copy Ansible Variables template file
+        copy:
+          src: yml-files/ansible-variables-template.env.yml
+          dest: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+        delegate_to: localhost
+
+      - name: Insert OS_AUTH_URL to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'OS_AUTH_URL_INPUT'
+          replace: '{{ deployment_data.dit_pod.name }}'
+
+      - name: Insert OS_PROJECT_NAME to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'OS_PROJECT_NAME_INPUT'
+          replace: '{{ deployment_data.dit_project.name }}'
+
+      - name: Insert OS_USERNAME to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'OS_USERNAME_INPUT'
+          replace: '{{ deployment_data.dit_project.username }}'
+
+      - name: Insert OS_PASSWORD to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'OS_PASSWORD_INPUT'
+          replace: '{{ deployment_data.dit_project.password }}'
+
+      - name: Insert KUBE_API_INGRESS_HOST to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'KUBE_API_INGRESS_HOST_INPUT'
+          replace: '{{ deployment_data.dtt_deployment.name }}'
+
+      - name: Insert LOCATION to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'LOCATION'
+          replace: '{{ deployment_data.dit_project_location }}'
+
+      - name: Insert INGRESSCTRL_LOADBALANCER_IP to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'INGRESSCTRL_LOADBALANCER_IP_INPUT'
+          replace: '{{ ingressctrl_loadbalancer_ip }}'
+
+      - name: Insert ECFE_POOL_CIDRS to Ansible Variables file
+        replace:
+          path: tmp-files/{{ deployment_id }}-ansible-variables.env.yml
+          regexp: 'ECFE_POOL_CIDRS_INPUT'
+          replace: '{{ ecfe_pool_cidrs }}'
+
+## Worker pools configuration (CIS-134480)
+    - name: Remove second worker pool configuration if only one worker pool defined in flavor
+      block:
+      - name: Import work pools configration from ccd flavor
+        include_vars: tmp-files/{{ deployment_id }}.env.yml
+
+      - name: Remove second worker pool configuration from {{ deployment_id }}-cloud.env.yml
+        replace:
+          path: tmp-files/{{ deployment_id }}-cloud.env.yml
+          regexp: '^.*name\:\s*pool2[^#]+'
+          replace: '  '
+        when: parameters.node_pools|length == 1
+
+    - name: Display files before MERGE
+      ansible.builtin.debug: var=item
+      with_file:
+        - "tmp-files/{{ deployment_id }}.env.yml"
+        - "tmp-files/{{ deployment_id }}-cloud.env.yml"
+        - "tmp-files/{{ deployment_id }}-ansible-variables.env.yml"
+
+    - name: Merge Config YAML documents
+      shell: "cd tmp-files; yq m -i {{ deployment_id }}.env.yml {{ deployment_id }}-cloud.env.yml {{ deployment_id }}-ansible-variables.env.yml" # noqa 204 301
+
+## Replace network alias with network uuid (CIS-134480)
+#    - name: Read network mappings from network list file and replace network alias with network uuid
+#      block:
+#      - name: Get CCD network list file from Minio
+#        aws_s3:
+#          aws_access_key: "{{ minio_access_key }}"
+#          aws_secret_key: "{{ minio_secret_key }}"
+#          s3_url: "{{ minio_url }}"
+#          bucket: templates
+#          object: /cloud/{{ dit_pod.name | lower }}.network.yml
+#          mode: getstr
+#          ignore_nonexistent_bucket: True
+#        register: network_list
+## STSOSS-2125
+
+## CIS-144973 Phase 2 - Implement DTT networking for CCD Initial Install
+#      - name: Check for DTT networkECN end user selection
+#        set_fact:
+#          ecn_network_selection: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+#        vars:
+#          products_qry: "[? product_type_name == 'CCD'].configuration"
+#          config_qry: "[? key_name == 'networkECN'].key_value"
+#        ignore_errors: yes
+    - name: Implement DTT networking for CCD Initial Install
+      block:
+      - name: Download openstack credentials from MinIO
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: tools
+          object: openstack_creds.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: openstack_access
+
+      - name: Import variables from openstack creds file
+        #no_log: yes
+        set_fact:
+          openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+      
+      - name: Set openstack username and password vars from openstack creds var
+        #no_log: yes
+        set_fact:
+          openstack_user: "{{ openstack_access_vars.openstack_user }}"
+          openstack_password: "{{ openstack_access_vars.openstack_password }}"
+          openstack_projectname: "{{ openstack_access_vars.openstack_projectname }}"
+      
+      - name: Check for DTT Traffic Network end user selection
+        set_fact:
+          workers_network_selection: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'networkTraffic'].key_value"
+##        ignore_errors: yes
+      
+      - name: Process DTT networkTraffic end user selection for IPV4
+        when: (workers_network_selection is defined) and (ip_version != "ipv6")
+        block:
+          - name: Check DTT Traffic Network value
+            when: workers_network_selection is defined
+            fail:
+              msg: "{{ workers_network_selection }} not a valid entry for DTT Workers Network"
+            when: "not workers_network_selection.startswith('ProviderNetwork-')"
+          
+          - name: "Check cloud for existing Traffic network"
+            openstack.cloud.networks_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: "{{ openstack_projectname }}"
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ workers_network_selection }}" 
+            register: result
+            
+          - name: Set Traffic network ID
+            set_fact:
+              traffic_network: "{{ result.networks.0.id }}"
+                
+          - name: Replace Traffic network with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "xdn_traffic_network"
+              replace: "{{ traffic_network }}"
+          
+          - name: "Check cloud for existing Traffic subnet"
+            openstack.cloud.subnets_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: "{{ openstack_projectname }}"
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ workers_network_selection }}-IPv4"
+            register: result
+            
+          - name: Set Traffic subnet ID
+            set_fact:
+              traffic_subnet: "{{ result.subnets.0.id }}"
+           
+          - name: Replace Traffic subnet with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_subnet"
+              replace: "{{ traffic_subnet }}" 
+              
+          - name: Set Traffic subnet GW
+            set_fact:
+              traffic_gw: "{{ result.subnets.0.gateway_ip }}"   
+
+          - name: Split traffic IP
+            set_fact: 
+              traffic_gw_split: "{{ traffic_gw.split('.') }}"
+
+          - name: Set IP for HSRP-a and HSRP-b
+            set_fact:
+              traffic_gw_hsrp_a: "{{ ( traffic_gw_split[0] + '.' + traffic_gw_split[1] + '.' + traffic_gw_split[2] ) + '.' + (traffic_gw_split[3]|int +1)|string}}"
+              traffic_gw_hsrp_b: "{{ ( traffic_gw_split[0] + '.' + traffic_gw_split[1] + '.' + traffic_gw_split[2] ) + '.' + (traffic_gw_split[3]|int +2)|string}}"
+
+              
+          - name: Replace BGP Peer Address A-side 
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_gateway_a"
+              replace: "{{ traffic_gw_hsrp_a }}"
+
+          - name: Replace BGP Peer Address B-side 
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_gateway_b"
+              replace: "{{ traffic_gw_hsrp_b }}"
+     
+
+
+      - name: Process DTT networkTraffic end user selection for IPV6
+        when: (workers_network_selection is defined) and ((ip_version == "ipv6") or (ip_version == "dual_stack"))
+        block:
+          - name: Check DTT Traffic Network value
+            when: workers_network_selection is defined
+            fail:
+              msg: "{{ workers_network_selection }} not a valid entry for DTT Workers Network"
+            when: "not workers_network_selection.startswith('ProviderNetwork-')"
+          
+          - name: "Check cloud for existing Traffic network"
+            openstack.cloud.networks_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: "{{ openstack_projectname }}"
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ workers_network_selection }}" 
+            register: result
+            
+          - name: Set Traffic network ID
+            set_fact:
+              traffic_network: "{{ result.networks.0.id }}"
+                
+          - name: Replace Traffic network with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "xdn_traffic_network"
+              replace: "{{ traffic_network }}"
+          
+          - name: "Check cloud for existing Traffic subnet"
+            openstack.cloud.subnets_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: "{{ openstack_projectname }}"
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ workers_network_selection }}-IPv6"
+            register: result
+            
+          - name: Set Traffic subnet ID
+            set_fact:
+              traffic_subnet: "{{ result.subnets.0.id }}"
+           
+          - name: Replace Traffic subnet with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_subnet"
+              replace: "{{ traffic_subnet }}" 
+              
+          - name: Set Traffic subnet GW
+            set_fact:
+              traffic_gw: "{{ result.subnets.0.gateway_ip }}"   
+
+          - name: Set IP for HSRP-a and HSRP-b
+            set_fact:
+              traffic_gw_hsrp_a: "{{ (traffic_gw | ipaddr('int') + 1) | ipaddr }}"
+              traffic_gw_hsrp_b: "{{ (traffic_gw | ipaddr('int') + 2) | ipaddr }}"
+
+          - name: Add placeholder for ipv6 gateways
+            ansible.builtin.blockinfile:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              insertbefore: "ecfe_my_asn"  # Insert before this line (adjust the pattern)
+              block: "{{ lookup('file', 'yml-files/gw_template.yml') }}"
+              marker: "# {mark} #ipv6 GWs"
+            when: ip_version == "dual_stack"    
+
+          - name: Replace BGP Peer Address A-side  (ipv6)
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_gateway_a"
+              replace: "{{ traffic_gw_hsrp_a }}"
+
+          - name: Replace BGP Peer Address B-side (ipv6)
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "ggn_gateway_b"
+              replace: "{{ traffic_gw_hsrp_b }}"
+
+     
+
+      - name: Check for DTT OAM Network end user selection
+        set_fact:
+          directors_network_selection: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'networkOAM'].key_value"
+##        ignore_errors: yes
+      
+      - name: Process DTT networkOAM end user selection
+        when: directors_network_selection is defined
+        block:         
+          - name: Check DTT OAM Network value
+            when: directors_network_selection is defined
+            fail:
+              msg: "{{ directors_network_selection }} not a valid entry for DTT OAM Network"
+            when: "not directors_network_selection.startswith('ProviderNetwork-')"
+          
+          - name: "Check cloud for existing OAM network"
+            openstack.cloud.networks_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: "{{ openstack_projectname }}"
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ directors_network_selection }}"
+            register: result
+            
+          - name: Set OAM network ID
+            set_fact:
+              oam_network: "{{ result.networks.0.id }}"
+                
+          - name: Replace OAM network with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "xdn_oam_network"
+              replace: "{{ oam_network }}" 
+          
+          - name: "Check cloud for existing OAM subnet"
+            openstack.cloud.subnets_info:
+              verify: no
+              auth:
+                auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+                username: "{{ openstack_user }}"
+                password: "{{ openstack_password }}"
+                project_name: stsccdpipeline
+                project_domain_name: Default
+                user_domain_name: Default
+              name: "{{ directors_network_selection }}-IPv4"
+            register: result
+      
+          - name: Set OAM subnet ID
+            set_fact:
+              oam_subnet: "{{ result.subnets.0.id }}"
+           
+          - name: Replace OAM subnet with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "xdn_oam_subnet"
+              replace: "{{ oam_subnet }}" 
+              
+              
+      - name: Check for DTT BGP myASN end user selection
+        set_fact:
+          bgp_my_asn: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'BGPmyASN'].key_value"
+#        ignore_errors: yes
+
+      - name: Process DTT BGP myASN end user selection
+        when: bgp_my_asn is defined
+        block:         
+          - name: Check DTT BGP myASN value
+            when: bgp_my_asn is defined
+            fail:
+              msg: "{{ bgp_my_asn }} not a valid entry for DTT BGPmyASN"
+            when: bgp_my_asn is not regex("^[0-9]*$")
+
+          - name: Replace BGP myASN number with end user selection
+            replace:
+              path: tmp-files/{{ deployment_id }}.env.yml
+              regexp: "bgp_myasn_number"
+              replace: "{{ bgp_my_asn }}"
+
+## CIS-141146 Ensure the existing ecn and ggn networks are re-used for CCD re-installs
+
+      - name: Get CCD last deployed env file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: sts-cni
+          object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: env_vars
+        ignore_errors: yes
+
+      - debug:
+          msg: "Note: {{ deployment_id }}.env.yml last deployed CCD env file does not exist in MinIO. OK for new deploy. NOK for redeploy."
+        when: "env_vars is failed"
+
+      - name : Imports vars
+        set_fact:
+          env_vars_detail: "{{ env_vars.contents | from_yaml }}"
+        when: "env_vars is not failed"
+
+      - name: Assign previous network vars from last CCD deploy
+        set_fact:
+          previous_director_network: "director_external_network: {{ env_vars_detail.parameters.director_external_network }}"
+          previous_director_subnet: "director_external_subnet: {{ env_vars_detail.parameters.director_external_subnet }}"
+          previous_worker_network: "- network: {{ env_vars_detail.parameters.node_pools[0].external_networks[0].network }}"
+          previous_worker_subnet: "subnet: {{ env_vars_detail.parameters.node_pools[0].external_networks[0].subnet | default('') }}"
+          previous_gateway: "- peer_address: {{ env_vars_detail.parameters.ansible_variables.ecfe_config_map_peers[0].peer_address }}"
+        when: "env_vars is not failed"
+
+      - name: Populate previous director network list
+        set_fact:
+          previous_director_network_list: "{{ previous_director_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ previous_director_network }}"
+          - "{{ previous_director_subnet }}"
+        when: "env_vars is not failed"
+
+      - name: Populate previous worker network list
+        set_fact:
+          previous_worker_network_list: "{{ previous_worker_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ previous_worker_network }}"
+          - "{{ previous_worker_subnet }}"
+          - "{{ previous_gateway }}"
+        when: "env_vars is not failed"
+
+      - name: Assign previous router network vars from last CCD deploy
+        set_fact:
+          previous_router_network: "- rnetwork: {{ env_vars_detail.parameters.node_pools[1].external_networks[0].network }}"
+          previous_router_subnet: "rsubnet: {{ env_vars_detail.parameters.node_pools[1].external_networks[0].subnet }}"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Populate previous router network list
+        set_fact:
+          previous_router_network_list: "{{ previous_router_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ previous_router_network }}"
+          - "{{ previous_router_subnet }}"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Include vars from {{ deployment_id }}.env.yml
+        include_vars: "tmp-files/{{ deployment_id }}.env.yml"
+        when: "env_vars is not failed"
+
+      - name: Assign fixed network vars from {{ deployment_id }}.env.yml
+        set_fact:
+          fixed_director_network: "director_external_network: {{ parameters.director_external_network }}"
+          fixed_director_subnet: "director_external_subnet: {{ parameters.director_external_subnet }}"
+          fixed_worker_network: "- network: {{ parameters.node_pools[0].external_networks[0].network }}"
+          fixed_worker_subnet: "subnet: {{ parameters.node_pools[0].external_networks[0].subnet }}"
+          fixed_gateway: "- peer_address: {{ parameters.ansible_variables.ecfe_config_map_peers[0].peer_address }}"
+        when: "env_vars is not failed"
+
+      - name: Populate fixed director network list
+        set_fact:
+          fixed_director_network_list: "{{ fixed_director_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ fixed_director_network }}"
+          - "{{ fixed_director_subnet }}"
+        when: "env_vars is not failed"
+
+      - name: Populate fixed worker network list
+        set_fact:
+          fixed_worker_network_list: "{{ fixed_worker_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ fixed_worker_network }}"
+          - "{{ fixed_worker_subnet }}"
+          - "{{ fixed_gateway }}"
+        when: "env_vars is not failed"
+
+      - name: Assign fixed router network vars from {{ deployment_id }}.env.yml
+        set_fact:
+          fixed_router_network: "- rnetwork: {{ parameters.node_pools[1].external_networks[0].network }}"
+          fixed_router_subnet: "rsubnet: {{ parameters.node_pools[1].external_networks[0].subnet }}"
+        when:
+          - "env_vars is not failed"
+          - parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Populate fixed router network list
+        set_fact:
+          fixed_router_network_list: "{{ fixed_router_network_list | default([]) + [ item ] }}"
+        with_items:
+          - "{{ fixed_router_network }}"
+          - "{{ fixed_router_subnet }}"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Replace router network instance
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "- network:"
+          replace: "- rnetwork:"
+          after: "- network:"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Replace router subnet instance
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: " subnet:"
+          replace: " rsubnet:"
+          after: " subnet:"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Replace fixed director network that does not equal previous director network
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "{{ item.0  }}"
+          replace: "{{ item.1 }}"
+        with_together:
+          - "{{ fixed_director_network_list }}"
+          - "{{ previous_director_network_list }}"
+        when:
+          - "env_vars is not failed"
+          - fixed_director_network != previous_director_network
+
+      - name: Replace fixed worker network that does not equal previous worker network
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "{{ item.0  }}"
+          replace: "{{ item.1 }}"
+        with_together:
+          - "{{ fixed_worker_network_list }}"
+          - "{{ previous_worker_network_list }}"
+        when:
+          - "env_vars is not failed"
+          - fixed_worker_network != previous_worker_network
+
+      - name: Replace fixed router network that does not equal previous router network
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "{{ item.0 }}"
+          replace: "{{ item.1 }}"
+        with_together:
+          - "{{ fixed_router_network_list }}"
+          - "{{ previous_router_network_list }}"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+          - fixed_router_network != previous_router_network
+
+      - name: Reset router network instance
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "- rnetwork:"
+          replace: "- network:"
+          after: "- network:"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+      - name: Reset router subnet instance
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: " rsubnet:"
+          replace: " subnet:"
+          after: " subnet:"
+        when:
+          - "env_vars is not failed"
+          - env_vars_detail.parameters.node_pools[1].external_networks[0].network is defined
+
+## CIS-136096 container registry configuration support
+    - name: Container registry configuration
+      block:
+      - name: Replace <deployment_id> with actual ccd hostname
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "<deployment_id>"
+          replace: "{{ deployment_data.dtt_deployment.name }}"
+
+      - name: Replace <site_location> with actual ccd location
+        replace:
+          path: tmp-files/{{ deployment_id }}.env.yml
+          regexp: "<site_location>"
+          replace: "{{ deployment_data.dit_project_location  }}"
+
+      - name: Read variables from {{ deployment_id }}.env.yml
+        include_vars: tmp-files/{{ deployment_id }}.env.yml
+
+      - name: Remove container_registry_hostname definition from {{ deployment_id }}.env.yml if it has empty value
+        lineinfile:
+          state: absent
+          regexp: "container_registry_hostname:"
+          path: tmp-files/{{ deployment_id }}.env.yml
+        register: container_registry_hostname_stat
+        when:
+          - parameters.ansible_variables.container_registry_hostname is defined
+          - not parameters.ansible_variables.container_registry_hostname
+
+      - debug:
+          msg: "container_registry_hostname is not defined, it will use  ECCD default value: k8s-registry.eccd.local"
+        when: parameters.ansible_variables.container_registry_hostname is not defined or container_registry_hostname_stat.changed
+
+      - name: Remove container_registry_storage_size definition from {{ deployment_id }}.env.yml if it has empty value
+        lineinfile:
+          state: absent
+          regexp: "container_registry_storage_size:"
+          path: tmp-files/{{ deployment_id }}.env.yml
+        register: container_registry_storage_size_stat
+        when:
+          - parameters.ansible_variables.container_registry_storage_size is defined
+          - not parameters.ansible_variables.container_registry_storage_size
+
+      - debug:
+          msg: "container_registry_storage_size is not defined, it will use  ECCD default value: 10Gi"
+        when: parameters.ansible_variables.container_registry_storage_size is not defined or container_registry_storage_size_stat.changed
+
+      - name: Remove container_registry_custom_user_id definition from {{ deployment_id }}.env.yml if it has empty value
+        lineinfile:
+          state: absent
+          regexp: "container_registry_custom_user_id:"
+          path: tmp-files/{{ deployment_id }}.env.yml
+        register: container_registry_custom_user_id_stat
+        when:
+          - parameters.ansible_variables.container_registry_custom_user_id is defined
+          - not parameters.ansible_variables.container_registry_custom_user_id
+
+      - debug:
+          msg: "container_registry_custom_user_id is not defined, it will use  ECCD default value: admin"
+        when: parameters.ansible_variables.container_registry_custom_user_id is not defined or container_registry_custom_user_id_stat.changed
+
+      - name: Remove container_registry_custom_pw definition from {{ deployment_id }}.env.yml if it has empty value
+        lineinfile:
+          state: absent
+          regexp: "container_registry_custom_pw:"
+          path: tmp-files/{{ deployment_id }}.env.yml
+        register: container_registry_custom_pw_stat
+        when:
+          - parameters.ansible_variables.container_registry_custom_pw is defined
+          - not parameters.ansible_variables.container_registry_custom_pw
+
+      - debug:
+          msg: "container_registry_custom_pw is not defined, it will use  ECCD default value: 32 character random string"
+        when: parameters.ansible_variables.container_registry_custom_pw is not defined or container_registry_custom_pw_stat.changed
+
+# CIS-136779: Update the generate-and-upload-conf.yml to enable the dynamic creation of image name
+
+    - name: Download flavor template file which contains ccd version from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: template_file
+
+    - name: Import variables from flavor template file
+      set_fact:
+        template_vars: "{{ template_file.contents|from_yaml }}"
+
+    - name: Save ccd version into variable on local
+      set_fact:
+        ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+    - name: Update director node image
+      replace:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        regexp: 'director_image:.*'
+        replace: 'director_image: eccd-{{ ccd_version }}-director'
+
+    - name: Update master node image
+      replace:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        regexp: 'master_image:.*'
+        replace: 'master_image: eccd-{{ ccd_version }}-node'
+
+    - name: Update worker node image
+      replace:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        regexp: '^(\s)*image:.*'
+        replace: '    image: eccd-{{ ccd_version }}-node'
+
+    - name: Insert ipv6 ansible variables
+      lineinfile:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        insertafter: "ansible_variables"
+        line: "    ipv6_nat: true"
+      when: (ip_version != "ipv6") or (ip_version == "dual_stack")
+
+    - name: Add header dual_stack
+      ansible.builtin.blockinfile:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        insertafter: "parameters"  
+        block: "{{ lookup('file', 'yml-files/dual_stack_header.yml') }}"
+        marker: "# {mark} #HEADER dual stack"
+      when: ip_version == "dual_stack"    
+
+    - name: Add header for ipv6 
+      ansible.builtin.blockinfile:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        insertafter: "parameters"  
+        block: "{{ lookup('file', 'yml-files/ipv6_header.yml') }}"
+        marker: "# {mark} #HEADER ivp6"
+      when: ip_version == "ipv6"    
+    
+    - name: Remove subnet for IPV6 or Dual Stack from env file
+      lineinfile:
+        path: tmp-files/{{ deployment_id }}.env.yml
+        state: absent
+        regexp: '^(.* {2,}subnet:.*)$'
+      when: ip_version == "dual_stack"
+
+    - name: "Upload {{ deployment_id }}.env.yml into MinIO bucket"
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        encrypt: no
+        bucket: sts-cni
+        object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+        src: tmp-files/{{ deployment_id }}.env.yml
+        mode: put
+        ignore_nonexistent_bucket: True
+
+    - name: Display sent {{ deployment_id }}.env.yml file
+      ansible.builtin.debug: var=item
+      with_file:
+        - "tmp-files/{{ deployment_id }}.env.yml"
+
+    always:
+    - name: Delete temp config directory
+      file:
+        path: ./tmp-files
+        state: absent

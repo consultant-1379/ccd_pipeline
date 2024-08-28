@@ -1,0 +1,10 @@
+---
+- name: Uninstall Eventrouter
+  kubernetes.core.helm:
+    name: eventrouter
+    namespace: "{{ namespace }}"
+    binary_path: "{{ helm_path }}"
+    kubeconfig_path: "{{ kubeconfig_path }}"
+    state: absent
+  tags:
+    - skip_ansible_lint

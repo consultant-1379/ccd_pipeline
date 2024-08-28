@@ -1,0 +1,9 @@
+  # OS Network Setup
+  ip_version: "dualstack" ###  The K8 will be deployed as an IPv6 cluster
+  internal_network_dualstack: True ### Mandatory parameter for deployment
+  internal_subnet_cidr: "10.0.10.0/24"
+  internal_gw_ip: "10.0.10.1"
+  internal_subnet_cidr_ipv6: "fd08::/64" ### Private IPv6 range , can use "fd08::/64"
+  internal_gw_ipv6: "fd08::1" ## Private IPv6 IP , can use "fd08::1" , will be assigned to the inside VIP of the directors
+  k8s_pod_cidr: "192.168.0.0/16,fd00:eccd:17:ffff::0/64" ### Private IPv6 Range, Must be /64
+  k8s_service_cidr: "10.96.0.0/12,fd00:eccd:18:ffff::5555:0/112" ### Private IPv6 Range, Must be /112 and within pod_cidr /64 Range

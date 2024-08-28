@@ -1,0 +1,190 @@
+---
+- name: Playbook to Generate the configuration required by CCD heat stack before transfer to xdn
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost,.athtem.eei.ericsson.se
+  vars:
+    total_ip_addresses_needed: 4
+    total_ip_addresses_needed_v6: 4
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+  roles:
+    - deployment_id
+
+# Additional required vars to be added when calling script:
+# - deployment_id: Name of the Deployment
+
+# Please note that any of the predefined variables can be over-ridden when calling script:
+# Eg. Provide a different number of IP addresses needed as total_ip_addresses_needed
+  tasks:
+  - name: Generate the configuration file required by CCD heat stack
+    block:
+    - name: Create temp config directory
+      file:
+        path: ./tmp-files
+        state: directory
+
+    - name: "Get Deployment '{{ deployment_id }}' from DTT"
+      include_role:
+        name: dtt
+
+    - name: Get DIT Project Link from DTT Deployments CCD Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Get IP_VERSION from DTT deployemnts API
+      set_fact:
+        ip_version: "{{ dtt_deployment.products[0].configuration | json_query('[?key_name==`ip_version`].key_value') | first  | default('ipv4') }}"
+
+    - name: Get DIT Project Location from DTT Deployments CCD Product
+      set_fact:
+        get_dit_project_location: "{{ dtt_deployment.products | json_query(products_qry) | lower }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].location"
+
+    - name: Save DIT Project Location as variable
+      set_fact:
+        dit_project_location: "{{ get_dit_project_location[0] }}"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{  dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: "{{ dit_project_link }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: "{{ get_dit_project.json }}"
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: "{{ dit_url }}/api/pods/{{ dit_project.pod_id }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project-Cloud as variable
+      set_fact:
+        dit_pod: "{{ get_dit_pod.json }}"
+
+    - name: Save Variables and Facts to file 
+      copy:
+        content: |
+          {
+            "dtt_deployment": {{ dtt_deployment | to_json }},
+            "dit_project_location": {{ dit_project_location | to_json }},
+            "dit_project": {{ dit_project | to_json }},
+            "dit_pod": {{ dit_pod | to_json }}
+          }
+        dest: /tmp/ansible-facts-{{ deployment_id }}.json
+
+    - name: Upload /tmp/ansible-facts-{{ deployment_id }}.json to XDN deployments
+      command:  >
+        lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+        'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+        put /tmp/ansible-facts-{{ deployment_id }}.json -o ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json;exit'
+        sftp://{{ sftp_host }}
+      register: sftp_result_upload
+    
+    - name: Prepare Flavor Template Config File
+      block:
+      - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+        set_fact:
+          ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+      - name: Get CCD Flavor env file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_access_key }}"
+          aws_secret_key: "{{ minio_secret_key }}"
+          s3_url: "{{ minio_url }}"
+          bucket: templates
+          object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.env.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: ccd_flavor_env
+
+      - name: Save Flavor env as base config yml file
+        copy:
+          content: "{{ ccd_flavor_env.contents }}"
+          dest: tmp-files/{{ ccd_flavor_name  }}.env.yml
+
+      - name: Get CCD Flavor template file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_access_key }}"
+          aws_secret_key: "{{ minio_secret_key }}"
+          s3_url: "{{ minio_url }}"
+          bucket: templates
+          object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: ccd_flavor_template
+
+      - name: Save Flavor Template as base config yml file
+        copy:
+          content: "{{ ccd_flavor_template.contents }}"
+          dest: tmp-files/{{ ccd_flavor_name }}.template.yml
+      
+
+    - name: Prepare Cloud Template Config File
+      block:
+      - name: Get CCD Cloud Template file from Minio
+        aws_s3:
+          aws_access_key: "{{ minio_access_key }}"
+          aws_secret_key: "{{ minio_secret_key }}"
+          s3_url: "{{ minio_url }}"
+          bucket: templates
+          object: /cloud/{{ dit_pod.name | lower }}.template.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: ccd_cloud_template
+
+      - name: Save Cloud Template as config yml file
+        copy:
+          content: "{{ ccd_cloud_template.contents }}"
+          dest: tmp-files/{{ dit_pod.name | lower }}.template.yml
+        delegate_to: localhost
+
+    - name: Upload {{ dit_pod.name | lower }}.template.yml to XDN minio/cloud
+      command:  >
+        lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+        'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+        put tmp-files/{{ dit_pod.name | lower }}.template.yml -o ccd_pipeline/minio/cloud/{{ dit_pod.name | lower }}.template.yml;exit' 
+        sftp://{{ sftp_host }}
+      register: sftp_result_upload
+    
+    - name: Upload {{ ccd_flavor_name  }}.env.yml to XDN minio/managed-config
+      command:  >
+        lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+        'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+        put tmp-files/{{ ccd_flavor_name  }}.env.yml -o ccd_pipeline/minio/managed-config/{{ ccd_flavor_name  }}.env.yml ;exit' 
+        sftp://{{ sftp_host }}
+      register: sftp_result_upload
+
+    - name: Upload {{ ccd_flavor_name  }}.template.yml to XDN minio/managed-config
+      command:  >
+        lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+        'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+        put tmp-files/{{ ccd_flavor_name }}.template.yml -o ccd_pipeline/minio/managed-config/{{ ccd_flavor_name  }}.template.yml ;exit' 
+        sftp://{{ sftp_host }}
+      register: sftp_result_upload
+

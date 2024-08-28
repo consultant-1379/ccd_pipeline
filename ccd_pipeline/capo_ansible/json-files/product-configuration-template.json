@@ -1,0 +1,30 @@
+[
+  {
+    "key_name": "version",
+    "key_value": "VERSION_VALUE"
+  },
+  {
+    "key_name":"ccd",
+    "key_value": "CCD_INSTALL_TYPE"
+  },
+  {
+    "key_name": "ccd.env.yml",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.env.yml"
+  },
+  {
+    "key_name": "controlplane.pem",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.controlplane.pem"
+  },
+  {
+    "key_name": "controlplanevip.yml",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.controlplanevip.yml"
+  },
+  {
+    "key_name": "target_kubeconfig",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.target_kubeconfig.conf"
+  },
+  {
+    "key_name": "cluster-monitoring",
+    "key_value": "http://10.59.130.93:3000/d/jrqiTE3Zz/de-cni-ccd-healthcheck-eu?orgId=1&var-ClusterName=DEPLOYMENT_ID&var-declname=DEPLOYMENT_ID&kiosk=tv"
+  }
+]

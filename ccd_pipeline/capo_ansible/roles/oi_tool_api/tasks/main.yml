@@ -1,0 +1,23 @@
+---
+- name: Set the API call Parameters if Passed to Role
+  set_fact:
+    api_params: "{{ oi_params.keys()|list|zip(oi_params.values()|list)|map('join', '=')|join('&') }}"
+  when: oi_params | length > 0
+
+- name: 'Call OI Tool API'
+  vars:
+    api_call: "{{ 'getAllOrderableItems' if api_params is not defined else 'getFilterOrderableItems?'+api_params }}"
+  uri:
+    url: "{{ oi_api_url }}/{{ api_call }}"
+    method: "{{ method }}"
+    body_format: "{{ body_format }}"
+    return_content: "{{ return_content }}"
+    validate_certs: "{{ validate_certs }}"
+  register: oi_api_result
+  retries: "{{ api_retries }}"
+  delay: "{{ api_delay }}"
+  until: not oi_api_result.failed
+
+- name: 'Set fact for results'
+  set_fact:
+    oi_api_results: "{{ oi_api_result.json }}"

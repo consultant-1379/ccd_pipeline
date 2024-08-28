@@ -1,0 +1,160 @@
+---
+# Playbook to Perform Cluster Healthcheck for a passed in Deployment ID
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Optional Vars:
+# - search_image_dir
+#     > String - Path to Images Location
+#     > Default - /ccd/IMAGES
+#     > Example Override - /ccd/IMAGES/STAGING
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook healthcheck.yml -e deployment_id=<deployment_id> --ask-vault-pass [ -e search_image_dir=/path/to/dir ]
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook healthcheck.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file [ -e search_image_dir=/path/to/dir ]
+#
+- name: Run health check on CAPO cluster
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+    - name: Check CCD CAPO existency in DTT
+      fail:
+        msg: Failure. Not a CAPO Deployment, Exiting Playbook.
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        capo_qry: "[? key_name == 'ccd'].key_value"
+        ccd_capo_query: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(capo_qry) }}"
+      when: ccd_capo_query | length == 0
+
+    - name: Get DIT Project Link from DTT Deployments CAPO Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: '{{ dit_project_link }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: '{{ get_dit_project.json }}'
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: '{{ dit_url }}/api/pods/{{ dit_project.pod_id }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Cloud as variable
+      set_fact:
+        dit_pod: '{{ get_dit_pod.json }}'
+
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+    - name: Block for getting config dir content
+      block:
+        - name: Ensure directory '{{ deployment_id }}' exists in '{{ capo_config_path }}'
+          file:
+            path: '{{ capo_config_path }}/{{ item }}'
+            state: directory
+          loop:
+            - "{{ deployment_id }}"
+            - "{{ deployment_id }}/{{ deployment_id }}"
+
+        - name: Download Deployment Environment file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.capo.env.yml
+            dest: /tmp/{{ deployment_id }}.env.yml
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Download deployment Kubeconfig file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.target_kubeconfig.conf
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Copy management_kubeconfig to target_kubeconfig
+          copy:
+            remote_src: yes
+            src: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/target_kubeconfig
+
+        - name: Copy management_kubeconfig to bootstrap_kubeconfig
+          copy:
+            remote_src: yes
+            src: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/bootstrap_kubeconfig
+
+        - name: Create config.yml 1 files
+          copy:
+            remote_src: yes
+            src: /tmp/{{ deployment_id }}.env.yml
+            dest: '{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/config.yml'
+
+        - name: create config.yml files
+          copy:
+            dest: '{{ capo_config_path }}/{{ deployment_id }}/config.yml'
+            content: |
+              context: {{ deployment_id }}
+
+        - name: Delete env file from tmp directory
+          file:
+            path: /tmp/{{ deployment_id }}.env.yml
+            state: absent
+
+    - name: CAPO Cluster healthcheck
+      block:
+        - name: Add CAPO Image path role
+          include_role:
+            name: capo_getimage_path
+
+        - name: Add CAPO set context role
+          include_role:
+            name: capo_setcontext
+
+        - name: execute healthcheck for {{ deployment_id }}
+          command: "{{ ccdadm_bin }} cluster healthcheck --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"

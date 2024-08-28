@@ -1,0 +1,166 @@
+## Upload directorvip.yml, director.pem and admin.conf to MinIO
+
+## Default (DTT and DIT must be ready): playbook will check if cluster is cENM from CCD flavor
+##   ansible-playbook upload-ccd-info-to-minio.yml -e deployment_id={ccd deployment id}
+## Manually pass director VIP
+##   ansible-playbook upload-ccd-info-to-minio.yml -e deployment_id={ccd deployment id}  -e director_ip={ccd director ip}
+---
+- name: Upload CCD infomation to MinIO
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files: vars/group_vars/minio.yml
+  vars:
+    dtt_url: http://atvdtt.athtem.eei.ericsson.se
+    dit_url: http://atvdit.athtem.eei.ericsson.se
+
+  tasks:
+    - name: Get OpenStack credentails from DIT and get director VIP from OpenStack
+      when:
+        - director_ip is undefined
+      block:
+      - name: set "dtt_deployment_name" to be {{ deployment_id }} with "ccd-" removed
+        set_fact:
+          dtt_deployment_name: "{{  deployment_id | regex_replace('^ccd-(.*)$', '\\1') }}"
+
+      - name: "Get Deployment '{{ dtt_deployment_name }}' from DTT"
+        uri:
+          method: GET
+          url: "{{ dtt_url }}/api/deployments?q=name={{ dtt_deployment_name }}"
+          return_content: yes
+          status_code: 200
+        register: get_dtt_deployment
+        until: get_dtt_deployment.json[0] and get_dtt_deployment.json[0].name == dtt_deployment_name
+        retries: 1
+        delay: 3
+
+      - name: Save DTT Deployment as variable
+        set_fact:
+          dtt_deployment: "{{ get_dtt_deployment.json[0] }}"
+
+      - name: Get DIT Project Link from DTT Deployments CCD Product
+        set_fact:
+          dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].links"
+          links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+      - name: Parse Project View link into Project API GET Link
+        set_fact:
+          dit_project_link: "{{  dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+      - name: Get Project from DIT
+        uri:
+          method: GET
+          url: "{{ dit_project_link }}"
+          return_content: yes
+          status_code: 200
+        register: get_dit_project
+        until: get_dit_project.json
+        retries: 1
+        delay: 3
+
+      - name: Save DIT Project as variable
+        set_fact:
+          dit_project: "{{ get_dit_project.json }}"
+
+      - name: Get Projects Cloud from DIT
+        uri:
+          method: GET
+          url: "{{ dit_url }}/api/pods/{{ dit_project.pod_id }}"
+          return_content: yes
+          status_code: 200
+        register: get_dit_pod
+        until: get_dit_pod.json
+        retries: 1
+        delay: 3
+
+      - name: Save DIT Project-Cloud as variable
+        set_fact:
+          dit_pod: "{{ get_dit_pod.json }}"
+
+      - name: Get director VIP
+        os_port_info:
+          filters:
+            name: directors-external-vip-port-{{ deployment_id }}
+          auth:
+            username: "{{ dit_project.username }}"
+            project_name: "{{ dit_project.name }}"
+            password: "{{ dit_project.password }}"
+            auth_url: "https://{{ dit_pod.name }}.athtem.eei.ericsson.se:13000/v3"
+            user_domain_name: Default
+            project_domain_name: Default
+        register: director_vip_port
+
+      - name: test
+        debug:
+          var: dit_pod.name
+
+      - name: Set director IP
+        set_fact:
+          director_ip: "{{ director_vip_port.openstack_ports[0].fixed_ips[0].ip_address }}"
+
+    - name: Create Object {{ deployment_id }} on MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: /ccd/{{ deployment_id }}
+        mode: create
+        ignore_nonexistent_bucket: True
+      failed_when: false
+
+    - name: Create file {{ deployment_id }}.directorvip.yml which contains VIP
+      copy:
+        dest: "/tmp/{{ deployment_id }}.directorvip.yml"
+        content: |
+          ---
+          directorvip: {{ director_ip }}
+
+    - name: Get director host with director IP overridden
+      include_role:
+        name: add_director_host
+
+    - name: Copy K8s conf and private SSH key from director to ansible host
+      fetch:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        flat: yes
+      loop:
+        - src: /home/eccd/.kube/config
+          dest: /tmp/{{ deployment_id }}.admin.conf
+        - src: /home/eccd/.ssh/id_rsa
+          dest: /tmp/{{ deployment_id }}.director.pem
+      delegate_to: "{{ director_ip }}"
+
+    - name: Replace admin url in K8s conf file {{ deployment_id }}.admin.conf
+      replace:
+        path: /tmp/{{ deployment_id }}.admin.conf
+        regexp: "https://nodelocal-api.eccd.local:6443"
+        replace: "https://api.{{ deployment_id }}.athtem.eei.ericsson.se"
+
+    - name: Upload deployment files into MinIO bucket
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: de-cni
+        object: "/ccd/{{ deployment_id }}/{{ item }}"
+        src: "/tmp/{{ item }}"
+        mode: put
+        ignore_nonexistent_bucket: True
+      loop:
+        - "{{ deployment_id }}.directorvip.yml"
+        - "{{ deployment_id }}.director.pem"
+        - "{{ deployment_id }}.admin.conf"
+
+    - name: Remove temp files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/{{ deployment_id }}.directorvip.yml"
+        - "/tmp/{{ deployment_id }}.director.pem"
+        - "/tmp/{{ deployment_id }}.admin.conf"

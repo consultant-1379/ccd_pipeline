@@ -1,0 +1,48 @@
+---
+# Download k8s admin config file from MinIO
+# Path to downloaded config can be accessed in variable {{ kubeconfig_path }}
+
+- name: Download K8s config file from MinIO
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: sts-cni
+    object: /ccd/{{ deployment_id }}/{{ deployment_id }}.admin.conf
+    dest: "{{ kubeconfig_path }}"
+    mode: get
+    ignore_nonexistent_bucket: True
+  notify: remove kubeconfig
+  delegate_to: localhost
+
+- name: Test connection of k8s config file and get k8s node list
+  k8s_info:
+    api_version: v1
+    kind: Node
+    kubeconfig: "{{ kubeconfig_path }}"
+  register: node_list
+
+- name: "Check if {{ deployment_id }} is baremetal"
+  set_fact:
+    is_baremetal: '{{ deployment_id | regex_search("^bmccd\d+") is not none  }}'
+
+- debug:
+    msg: 'Deployment {{ deployment_id }} is{{ " " if is_baremetal else " not " }}baremetal'
+
+
+- block:
+  - name: Filter the deployment ID from the k8s node names
+    set_fact:
+      filter_result: "{{ node_list | to_json | regex_search (deployment_id) }}"
+
+  - name: Correct k8s config file is used
+    debug:
+      msg: Correct k8s config file is used
+    when: filter_result == deployment_id
+
+  - name: Stop the playbook running if wrong CCD is connected
+    fail:
+      msg: Node hostname doesn't match deployment_id. Please check if files in MinIO are up to date.
+    when: filter_result != deployment_id
+  when: not is_baremetal
+

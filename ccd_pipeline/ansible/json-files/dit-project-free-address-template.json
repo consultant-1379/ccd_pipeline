@@ -1,0 +1,7 @@
+{
+  "pod_name": "POD_NAME",
+  "network_name": "NETWORK_NAME",
+  "name": "PROJECT_NAME",
+  "ip_type": "ipv4",
+  "number_of_addresses": 9999
+}

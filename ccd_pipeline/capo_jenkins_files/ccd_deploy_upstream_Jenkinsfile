@@ -1,0 +1,70 @@
+pipeline {
+  agent {
+    node {
+      label 'ccd_pipeline_jenkins_agent'
+    }
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 240, unit: 'MINUTES')
+    timestamps()
+  }
+  parameters {
+        string(
+            name: 'deployment_id',
+            defaultValue: 'stsvpXccdXX',
+            description: 'Name of CCD deployment.\nPlease read following http://wiki.stsoss.seli.gic.ericsson.se:8080//index.php/CAPO_pipeline_in_ECN',
+            trim: true
+        )
+  }	
+  stages {
+    stage('Set build name') {
+      steps {
+          script {
+               currentBuild.displayName = "${env.BUILD_NUMBER} ${params.deployment_id}"
+          }
+      }
+    }
+
+    stage('Run Pre-Requisites Check') {
+      steps {
+	        build job: 'CAPO_check_images', parameters: [string(name: 'deployment_id', value: "${params.deployment_id}")]
+      }
+    }
+
+    stage('Run Generate Config for deployment') {
+      steps {
+          build job: 'CAPO_generate_config', parameters: [string(name: 'deployment_id', value: "${params.deployment_id}")]
+      }
+    }
+
+    stage('Deploy CCD') {
+      steps {
+          build job: 'CAPO_deploy_cluster', parameters: [string(name: 'deployment_id', value: "${params.deployment_id}")]
+      }
+    }
+
+    stage ('Add CCD to monitoring'){
+      steps{
+          echo "Running add_to_monitoring"
+          build job: 'CAPO_add_to_monitoring', parameters: [string(name: 'deployment_id', value: "${params.deployment_id}")]
+      }
+    }
+
+    stage('Run deployment Healthcheck') {
+      steps {
+          build job: 'CAPO_healthcheck', parameters: [string(name: 'deployment_id', value: "${params.deployment_id}")]
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}

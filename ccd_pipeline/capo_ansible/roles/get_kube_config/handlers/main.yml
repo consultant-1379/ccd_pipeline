@@ -1,0 +1,6 @@
+---
+- name: remove kubeconfig
+  file:
+    path: "{{ kubeconfig_path }}"
+    state: absent
+  delegate_to: localhost

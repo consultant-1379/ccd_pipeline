@@ -1,0 +1,99 @@
+## Upload controlplanevip.yml, controlplane.pem and target_kubeconfig to deployment MinIO
+
+## Default (There must be an .env file for the deployment on minio):
+##
+##   ansible-playbook upload-ccd-info-to-minio.yml -e deployment_id={ccd deployment id}
+##
+## For Running against a Staging Deployment (extra var 'search_image_dir' required):
+##   ansible-playbook upload-ccd-info-to-minio.yml -e deployment_id={ccd deployment id} -e search_image_dir=/ccd/IMAGES/STAGING
+##
+---
+- name: Upload capo-CCD post deployment files to MinIO
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    use_upgrade_build_server: true
+  roles:
+    - deployment_id
+
+
+  tasks:
+    - name: Get deployment details from DTT, create files and upload to MinIO
+      block:
+
+      - name: Get the Control Plane file
+        slurp:
+          src: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/target_kubeconfig"
+        register: cp_vip
+
+      - name: Parse Control Plane file
+        set_fact:
+          cp_parsed: "{{ cp_vip['content'] | b64decode }}"
+
+      - name: Set Control Plane VIP file variable
+        set_fact:
+          cp_server_string: "{{ cp_parsed | regex_search('.*server.*\n') | trim }}"
+
+
+      - name: Set control plane VIP variable contd (format string for insertion)
+        set_fact:
+          controlplane_ip: "{{ cp_server_string | regex_replace('^server: https://(.*)$', '\\1') | regex_replace('[:].*$', '') }}"
+
+
+      - name: Create Control Plane vip file
+        copy:
+         dest: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/{{ deployment_id }}.controlplanevip.yml"
+         content: |
+           ---
+           controlplanevip: {{ controlplane_ip }}
+
+      - name: Create target_kubeconf.conf file
+        copy:
+         dest: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/{{ deployment_id }}.target_kubeconfig.conf"
+         content: |
+            {{ cp_parsed }}
+
+      - name: Get private key for controlplane.pem file
+        slurp:
+          src: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/cp_ssh_key"
+        register: cp_pem
+
+      - name: Save Control Plane VIP as variable
+        set_fact:
+          controlplane_pem: "{{ cp_pem['content'] | b64decode }}"
+
+      - name: Create Control Plane pem file
+        copy:
+         dest: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/{{ deployment_id }}.controlplane.pem"
+         content: |
+           {{ controlplane_pem }}
+
+
+      - name: Create Object {{ deployment_id }} in MinIO sts-cni bucket if it doesn't exist
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: sts-cni
+          object: /ccd/{{ deployment_id }}
+          mode: create
+          ignore_nonexistent_bucket: True
+        failed_when: false
+
+      - name: Upload deployment files into MinIO bucket
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          encrypt: no
+          bucket: sts-cni
+          object: "/ccd/{{ deployment_id }}/{{ item }}"
+          src: "{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/{{ item }}"
+          mode: put
+          ignore_nonexistent_bucket: True
+        loop:
+          - "{{ deployment_id }}.controlplanevip.yml"
+          - "{{ deployment_id }}.controlplane.pem"
+          - "{{ deployment_id}}.target_kubeconfig.conf"

@@ -1,0 +1,102 @@
+---
+- name: Report the status of Predrop fastfeedback pipeline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost,.athtem.eei.ericsson.se
+
+  roles:
+    - role: dtt
+      vars:
+        login: yes
+
+  tasks:
+
+  - name: set stages fastfeedback version is present on DTT
+    set_fact:
+      stages_with_fastfeedback_version:
+        - 'capo_predropfastfeedback_verify_fastfeedback_version'
+        - 'capo_predropfastfeedback_download_predrop'
+        - 'capo_predropfastfeedback_populate_fastfeedback_version'
+        - 'capo_predropfastfeedback_assign_fastfeedback_version'
+
+  - name: Get {{ dtt_name }} CCD Fast Feedback version in DTT
+    set_fact:
+      ccd_fastfeedback_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].configuration"
+      config_qry: "[? key_name == 'fastfeedback_version'].key_value"
+    ignore_errors: yes
+    when: stage in stages_with_fastfeedback_version
+
+  - name: get {{ dtt_name }} CCD Fast Feedback version from O.I template
+    block:
+      - name: Get {{ dtt_name }} CCD Flavor in DTT
+        set_fact:
+          ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+        vars:
+          products_qry: "[? product_type_name == 'CCD'].configuration"
+          config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+      - name: Verify value for CCD Flavor in DTT
+        fail:
+          msg: "Flavor is not defined in DTT target deployment {{ dtt_name }}"
+        when: "ccd_flavor_name is not defined"
+
+      - name: Get CCD Flavor Template file from MinIO
+        aws_s3:
+          aws_access_key: "{{ minio_access_key }}"
+          aws_secret_key: "{{ minio_secret_key }}"
+          s3_url: "{{ minio_url }}"
+          bucket: templates
+          object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+          mode: get
+          ignore_nonexistent_bucket: True
+          dest: /tmp/{{ ccd_flavor_name }}.template.yml
+
+      - name: extract Fastfeedback version from file
+        slurp:
+          src: /tmp/{{ ccd_flavor_name }}.template.yml
+        register: flavor_file
+
+      - name: Set User Password
+        set_fact:
+          ccd_fastfeedback_version: "{{ flavor_file['content'] | b64decode | regex_findall('ccd_version:.*') | first }}"
+
+      - name: Delete {{ ccd_flavor_name }}.template.yml file
+        file:
+          path: /tmp/{{ ccd_flavor_name }}.template.yml
+          state: absent
+    when: stage not in stages_with_fastfeedback_version
+
+  - name: Set CCD Fast Feedback version if undefined in DTT
+    set_fact:
+      ccd_fastfeedback_version: "(Version NOT DEFINED IN DTT)"
+    when: ccd_fastfeedback_version is not defined
+
+  - name: Create predropfastfeedback JIRA issue
+    uri:
+      url: "{{ jira_url }}"
+      user: "{{ jira_username }}"
+      password: "{{ jira_password }}"
+      method: POST
+      body: {
+        "fields":
+        {
+          "project":
+          {
+            "key": "CIS"
+            },
+            "summary": "{{ status }} capo_predropfastfeedback for deployment: {{ dtt_name }} using ccd version {{ ccd_fastfeedback_version }} for stage {{ stage }}",
+            "customfield_15706": "DE-CNI",
+            "issuetype": {"name": "Support"},
+            "customfield_16801": {"value": "DE"},
+            "customfield_16800": {"value": "Athlone"},
+            "components": [{"name":"DE-CloudNative"}],
+            "description": "Build url: {{ build_url }}"
+            }
+            }
+      force_basic_auth: yes
+      status_code: 201
+      body_format: json

@@ -1,0 +1,30 @@
+[
+  {
+    "key_name": "version",
+    "key_value": "{{ ccd_version }}"
+  },
+  {
+    "key_name": "staging_version",
+    "key_value": "{{ ccd_staging_version }}"
+  },
+  {
+    "key_name": "ccd.env.yml",
+    "key_value": "{{ s3_storage_url }}/{{ deployment_id }}/{{ deployment_id }}.env.yml"
+  },
+  {
+    "key_name": "controlplane.pem",
+    "key_value": "{{ s3_storage_url }}/{{ deployment_id }}/{{ deployment_id }}.controlplane.pem"
+  },
+  {
+    "key_name": "controlplanevip.yml",
+    "key_value": "{{ s3_storage_url }}/{{ deployment_id }}/{{ deployment_id }}.controlplanevip.yml"
+  },
+  {
+    "key_name": "target_kubeconfig",
+    "key_value": "{{ s3_storage_url }}/{{ deployment_id }}/{{ deployment_id }}.target_kubeconfig.conf"
+  },
+  {
+    "key_name": "cluster-monitoring",
+    "key_value": "http://10.59.130.93:3000/d/jrqiTE3Zz/de-cni-ccd-healthcheck-eu?orgId=1&var-ClusterName={{ deployment_id }}&var-declname={{ deployment_id }}&kiosk=tv"
+  }
+]

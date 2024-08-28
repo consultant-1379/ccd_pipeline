@@ -1,0 +1,31 @@
+---
+# Run a playbook on director using CCD inventory
+
+- name: Run playbook on CCD director
+  block:
+    - name: Create temporary playbook directory
+      tempfile:
+        state: directory
+        suffix: .playbook
+      register: ccd_playbook_dir
+
+    - name: "Copy {{ ccd_playbook }} to {{ ccd_playbook_dir.path }} on director"
+      copy:
+        src: "{{ ccd_playbook }}"
+        dest: "{{ ccd_playbook_dir.path }}"
+
+    - name: "Running {{ ccd_playbook }} on CCD"
+      become: yes
+      command: ansible-playbook -vv "{{ ccd_playbook_dir.path }}/{{ ccd_playbook }}"
+      environment:
+        - ANSIBLE_INVENTORY: "{{ ccd_inventory_file }}"
+      register: playbook_result
+      changed_when: playbook_result.stdout | regex_findall('changed=[^0]')
+  delegate_to: "{{ director_ip }}"
+  always:
+    - name: Remove temp playbook dir
+      file:
+        path: "{{ ccd_playbook_dir.path }}"
+        state: absent
+      when: ccd_playbook_dir.path is defined
+      delegate_to: "{{ director_ip }}"

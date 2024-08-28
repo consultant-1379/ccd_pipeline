@@ -1,0 +1,65 @@
+---
+# Playbook to delete old & unused pre-build Images of CAPO.
+# Current in-use image is extracted from the staging deployment_id.
+# All other Images present in STAGING dir on the Build Server will be deleted.
+#
+# This playbook is used as part of the staging pipeline.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook capo_staging_delete_old_images.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook capo_staging_delete_old_images.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- hosts: localhost
+  gather_facts: no
+  vars:
+    capo_image_path: /ccd/IMAGES
+    staging_dir : STAGING
+  roles:
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: yes
+  tasks:
+    - name: Ensure CAPO staging drop version exists on build server
+      delegate_to: "{{ build_server_ip }}"
+      block:
+        - name: Check if capo-{{ dtt_ccd_version }} directory already in '{{ capo_image_path }}/{{ staging_dir }}'
+          find:
+            paths: '{{ capo_image_path }}/{{ staging_dir }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-{{ dtt_ccd_version }}.*$"
+          register: staging_image_path
+
+        - name: Ensure capo-{{ dtt_ccd_version }} present On Build Server
+          assert:
+            that: staging_image_path.files | length > 0
+            fail_msg:
+              - Unable to locate Image for capo-{{ dtt_ccd_version }} on Build Server
+              - Directory searched - '{{ capo_image_path }}/{{ staging_dir }}'
+              - Cannot Delete any Images as The product item 'version' in the Deployment DTT Entry may be Incorrect
+              - Please Verify product item 'version' for {{ deployment_id }} DTT entry
+              - Exiting Playbook!
+
+        - name: Search for any old versions in '{{ capo_image_path }}/{{ staging_dir }}'
+          find:
+            paths: '{{ capo_image_path }}/{{ staging_dir }}'
+            file_type: directory
+            excludes: "*capo-{{ dtt_ccd_version }}*"
+          register: images_to_delete
+
+        - name: Delete all old staging verisons except for latest from '{{ capo_image_path }}/{{ staging_dir }}'
+          file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ images_to_delete.files }}"

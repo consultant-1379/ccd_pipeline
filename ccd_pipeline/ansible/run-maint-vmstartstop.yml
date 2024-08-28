@@ -1,0 +1,62 @@
+# https://confluence-oss.seli.wh.rnd.internal.ericsson.com/display/CIE/Cloud+Maintenance+Window+Playbook+Guide
+---
+- name: Run VM Start/Stop on CCD Clusters in Maintenance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    s3_maintenance_url: "/ccd/cloud-maintenance-window"
+    cluster_in_maint: ccd-clusters-in-maintenance
+  vars_files:
+     - vars/group_vars/minio.yml
+
+  tasks:
+
+    - name: Download ccd cluster vm action directive
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: "{{ s3_maintenance_url }}/ccd-vm-vars.yml"
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: vm_action_directive
+
+    - name: Import variable from ccd-vm-vars
+      set_fact:
+        vm_directive: "{{ vm_action_directive.contents|from_yaml }}"
+
+    - name: Download {{ cluster_in_maint }}.yml from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: "{{ s3_maintenance_url }}/{{ cluster_in_maint }}.yml"
+        mode: get
+        dest: /tmp/{{ cluster_in_maint }}.yml
+        ignore_nonexistent_bucket: True
+
+    - name: Set fact for ccd clusters in maintenance
+      set_fact:
+        cluster_list: "{{ cluster_list| default([]) + [ item ] }}"
+      with_lines: cat "/tmp/{{ cluster_in_maint }}.yml"
+      tags:
+        - skip_ansible_lint
+
+    - name : "Include tasks-maint-vmstartstop.yml"
+      include_tasks: tasks-maint-vmstartstop.yml
+      vars:
+        deployment_id: "{{ outer_item }}"
+      with_items: " {{ cluster_list }}"
+      loop_control:
+        loop_var: outer_item
+
+    - name: Remove temp data
+      file:
+        state: absent
+        path: "{{ item }}"
+      with_items:
+        - "/tmp/{{ cluster_in_maint }}.yml"
+      changed_when: false

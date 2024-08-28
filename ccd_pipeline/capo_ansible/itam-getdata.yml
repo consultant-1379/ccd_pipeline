@@ -1,0 +1,212 @@
+---
+- name: Gather ITAM Data for {{ deployment_id }}
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    hydra_token: "unknown"
+    hydra_link: "hydra.gic.ericsson.se/testing.hydra.gic.ericsson.se"
+    itam_data_file: "itam_target_data.yml"
+  roles:
+    - utils_deployment_vars
+  handlers:
+    - name: Cleanup
+      file:
+        path: '{{ item }}'
+        state: absent
+      loop:
+        - /tmp/eccd.pem
+        - /tmp/{{ itam_data_file }}
+  tasks:
+    - name: Assign dit pod name
+      set_fact:
+        dit_pod_name: "{{ deployment_id | regex_replace('ccd-c', 'cloud') | regex_replace('0[0-9].*','') }}"
+
+    - name: Assign openstack target cloud fdqn
+      set_fact:
+        openstack_fqdn: "{{ dit_pod_name }}.athtem.eei.ericsson.se"
+
+    - name: Get list of DIT ecfe pool ranges
+      set_fact:
+        ecfe_pool_cidrs: "{{ ipv4_ranges + ipv6_ranges  }}"
+      vars:
+        ipv4_ranges: "{{ dit_project.network.ipv4_ranges | json_query('[*].[start,end]') | map('join', '-') | list | default([]) }}"
+        ipv6_ranges: "{{ dit_project.network.ipv6_ranges | json_query('[*].[start,end]') | map('join', '-') | list | default([]) if dtt_ip_version is defined and dtt_ip_version in ('dualstack') else [] }}"
+    - name: Verify vars are populated
+      assert:
+        that:
+          - dit_pod_name | length > 0
+          - openstack_fqdn | length > 0
+          - ecfe_pool_cidrs | length > 0
+        fail_msg:
+          - either of below data items not populated as expected
+          - dit_pod_name ... {{ dit_pod_name }}
+          - openstack_fqdn ... {{ openstack_fqdn }}
+          - ecfe_pool_cidrs ... {{ ecfe_pool_cidrs }}
+
+    - name: Assign capo openstack target cloud network
+      set_fact:
+        ggn_network: "{{ deployment_env.infra.iaas.capo.oam_network.name }}"
+      when:
+        - dtt_deployment_type is defined
+        - dtt_deployment_type in ('capo')
+
+    - name: Block to Assign ccd openstack target cloud network
+      when: (dtt_deployment_type is defined and dtt_deployment_type in ('ccd')) or dtt_deployment_type is not defined
+      block:
+        - name: Get all target cloud Meteo clusters
+          uri:
+            method: GET
+            url: https://meteo.athtem.eei.ericsson.se/get-ccd-project-api/
+            return_content: yes
+            status_code: "200"
+            validate_certs: no
+          register: meteo_return
+
+        - name: Assign ccd openstack target cloud network
+          set_fact:
+            ggn_network: "{{ ggn_qry | first }}"
+          vars:
+            project_qry: "[? project_name == '{{ dit_project.name }}'].network"
+            ggn_qry: "{{ meteo_return.json.ccd_projects | json_query(project_qry) }}"
+          when: ggn_qry | length > 0
+
+    - name: Create /tmp/eccd.pem for ccd cluster {{ deployment_id }}
+      copy:
+        dest: /tmp/eccd.pem
+        mode: '0600'
+        content: "{{ deployment_pem }}"
+      notify: Cleanup
+
+    - name: Get operating system for cluster {{ deployment_id }}
+      shell: " cat templates/get_itam_cluster_os.sh | ssh -o StrictHostKeyChecking=no -i /tmp/eccd.pem eccd@{{ deployment_vip }}"
+      register: os
+      tags:
+        - skip_ansible_lint
+
+    - name: Assign operating system vars for cluster {{ deployment_id }}
+      set_fact:
+        operating_system_version: "{{ os | regex_replace('^.*PRETTY_NAME=\\\"') | regex_replace('\\\".*') }}"
+        operating_system_version_id: "{{ os | regex_replace('^.*ID=\\\"') | regex_replace('\\\".*') }}"
+
+    - name: Get target cluster network id
+      uri:
+        method: GET
+        url: "https://meteo.athtem.eei.ericsson.se/get-network-id-api/?{{ dit_pod_name_format }}&network_name={{ ggn_network }}"
+        return_content: yes
+        status_code: "200"
+        validate_certs: no
+      register: meteo_networkid
+      vars:
+        dit_pod_name_format: "{{ dit_pod_name | regex_replace('cloud', 'cloud=') | regex_replace('0[0-9].*','') }}"
+
+    - name: Verify vars are populated
+      assert:
+        that:
+          - dit_project.name | length > 0
+          - ggn_network | length > 0
+          - dit_project.username | length > 0
+          - operating_system_version | length > 0
+          - operating_system_version_id | length > 0
+          - meteo_networkid.json | length > 0
+          - dit_project.id | length > 0
+        fail_msg:
+          - either of below data items not populated as expected
+          - dit_project_name ... {{ dit_project.name }}
+          - network_name ... {{ ggn_network }}
+          - openstack_username ... {{ dit_project.username }}
+          - operating_system .... {{ operating_system_version }}
+          - operating_system_id .... {{ operating_system_version_id }}
+          - openstack_network_id .... {{ meteo_networkid.json }}
+          - operating_project_id .... {{ dit_project.id }}
+
+    - name: Display CCD Flow
+      debug:
+        msg:
+          - "Deployment ID : {{ deployment_id }}"
+          - "Cluster type: {{ dtt_deployment_type | default('ccd') }}"
+          - "Hydra link: {{ hydra_link }}"
+          - "Hydra token: {{ hydra_token }}"
+          - "Openstack FDQN: {{ openstack_fqdn }}"
+          - "Openstack project name: {{ dit_project.name }}"
+          - "Openstack network name: {{ ggn_network }}"
+          - "Openstack username: {{ dit_project.username }}"
+          - "Operating system version: {{ operating_system_version }}"
+          - "Operating system version id: {{ operating_system_version_id }}"
+          - "Hydra Tenant ID: 272" # (272 for PDU OSS)
+          - "Hydra Team ID: 2482" #(2482 for EST-NM-ATH-SAN-DECNI)
+
+    - name: Display CCD Ports Flow
+      debug:
+        msg:
+          - "Openstack network id: {{ meteo_networkid.json }}"
+          - "Openstack project id: {{ dit_project.id }}"
+
+    - name: Display ECFE Flow
+      debug:
+        msg:
+          - "ECFE IPs:"
+          - "{{ ecfe_pool_cidrs }}"
+
+    - name: Get {{ itam_data_file }} file from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: playbook-reports
+        object: /itam/{{ itam_data_file }}
+        dest: /tmp/{{ itam_data_file }}
+        mode: get
+        ignore_nonexistent_bucket: True
+      register: itam_vars
+      ignore_errors: true
+      notify: Cleanup
+
+    - name: Notify if {{ itam_data_file }} does not exist
+      fail:
+        msg: "Fatal : {{ itam_data_file }} does not exist in MinIO bucket playbook-reports/itam"
+      when: "itam_vars is failed"
+
+    - name: Write itam target data for cluster {{ deployment_id }}
+      blockinfile:
+        path: /tmp/{{ itam_data_file }}
+        insertafter: EOF
+        block: |
+          Deployment ID : {{ deployment_id }}
+          # Get CCD Flow
+          Cluster type: {{ dtt_deployment_type | default('ccd') }}
+          Hydra link: {{ hydra_link}}
+          Hydra token: {{ hydra_token }}
+          Openstack FDQN: {{ openstack_fqdn }}
+          Openstack project name: {{ dit_project.name }}
+          Openstack network name: {{ ggn_network }}
+          Openstack username: {{ dit_project.username }}
+          Hydra Tenant ID: 272
+          Hydra Team ID: 2482
+          Operating system version: {{ operating_system_version }}
+          Operating system version id: {{ operating_system_version_id }}
+          # Get CCD Ports Flow
+          Openstack network id: {{ meteo_networkid.json }}
+          Openstack project id: {{ dit_project.id }}
+          # Get ECFE Flow
+          ECFE IPs: {{ ecfe_pool_cidrs }}
+        marker: " "
+
+    - name: Upload {{ itam_data_file }} file to Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: playbook-reports
+        object: /itam/{{ itam_data_file }}
+        src: /tmp/{{ itam_data_file }}
+        mode: put
+        ignore_nonexistent_bucket: True
+      register: itam_upload_vars
+      ignore_errors: true
+
+    - name: Notify if capo {{ deployment_id }}.env.yml does not exist
+      fail:
+        msg: "Fatal : /tmp/{{ itam_data_file }}.yml does not exist in MinIO"
+      when: "itam_upload_vars is failed"

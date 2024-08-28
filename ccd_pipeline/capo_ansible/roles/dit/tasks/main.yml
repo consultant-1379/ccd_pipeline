@@ -1,0 +1,12 @@
+---
+# Get DIT details for a deployment
+# Optionally log in
+# Input variable(s):
+#   deployment_id - Deployment ID
+#   login - Optional flag to log into DIT
+# Output variable(s):
+#   dit_deployment - URI response from DIT for deployment
+#   dit_cookie - DIT login cookie if login was enabled
+- name: Log in to DIT
+  import_tasks: login.yml
+  when: login is true

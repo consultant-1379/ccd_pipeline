@@ -1,0 +1,29 @@
+pipeline {
+  agent {
+    node {
+      label 'ccd_pipeline_jenkins_agent'
+    }
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 90, unit: 'MINUTES')
+    timestamps()
+  }
+  stages {
+    stage('PING SELI DNS') {
+      steps {
+        sh "cd ccd_pipeline/ansible; ansible-playbook ping_seli_dns.yml -vvv"
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}

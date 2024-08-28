@@ -1,0 +1,70 @@
+# https://confluence-oss.seli.wh.rnd.internal.ericsson.com/display/CIE/Cloud+Maintenance+Window+Playbook+Guide
+---
+- name: Run HealthCheck on CCD Clusters in Cloud Maintenance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: vars/group_vars/minio.yml
+  vars:
+    cluster_in_maint: ccd-clusters-in-maintenance
+    s3_maintenance_url: "/ccd/cloud-maintenance-window"
+
+  tasks:
+
+    - name: Set ccd cluster health summary folder
+      set_fact:
+        health_report_dir: "./cluster_health_report"
+
+    - name: Create health summary folder
+      file:
+        path: "{{ health_report_dir }}"
+        state: directory
+      changed_when: false
+
+    - name: Download {{ cluster_in_maint }}.yml from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: "{{ s3_maintenance_url }}/{{ cluster_in_maint }}.yml"
+        mode: get
+        dest: /tmp/{{ cluster_in_maint }}.yml
+        ignore_nonexistent_bucket: True
+      changed_when: false
+
+    - name: Run healthcheck on ccd clusters in  maintenance
+      shell: 'ansible-playbook healthcheck.yml -e deployment_id={{ item }} > {{ health_report_dir }}/healthcheck-{{ item }}.yml'
+      with_lines: cat "/tmp/{{ cluster_in_maint }}.yml"
+      ignore_errors: yes
+      changed_when: false
+      tags:
+        - skip_ansible_lint
+
+    - name: Get cluster healthcheck reports
+      command: "ls {{ health_report_dir }}"
+      changed_when: false
+      register: healthcheck_reports
+
+    - name: Upload cluster healthcheck reports to MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        encrypt: no
+        bucket: de-cni
+        object: "{{ s3_maintenance_url }}/{{ item }}"
+        src: "{{ health_report_dir }}/{{ item }}"
+        mode: put
+        ignore_nonexistent_bucket: True
+      with_items: "{{ healthcheck_reports.stdout_lines }}"
+      changed_when: false
+
+    - name: Remove temp data
+      file:
+        state: absent
+        path: "{{ item }}"
+      with_items:
+        - "{{ health_report_dir }}"
+        - "/tmp/{{ cluster_in_maint }}.yml"
+      changed_when: false

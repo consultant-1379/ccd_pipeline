@@ -1,0 +1,87 @@
+---
+- name: Retrieve DTT Deployment Data
+  include_role:
+    name: dtt
+
+- name: Block to Extract Specific Items from DTT Product Configuration
+  vars:
+    products_qry: "[? product_type_name == 'CCD'].configuration"
+    product_configuration: "{{ dtt_deployment.products | json_query(products_qry) | first }}"
+  block:
+    - name: Assign Client VM Vars from DTT Deployment Data if present
+      set_fact:
+        dtt_clientvm_deploy: "{{ (clientvm_qry | first).split('-') | first  }}"
+        dtt_clientvm_flavor: "{{ ((clientvm_qry | first).split('-'))[-1]  }}"
+      when: clientvm_qry | length > 0
+      vars:
+        clientvm_value: "[? key_name == 'client_vm'].key_value"
+        clientvm_qry: "{{ product_configuration | json_query(clientvm_value) }}"
+
+    - name: Assign Deploymnt Staging CCD Version from DTT Deployment Data if present
+      set_fact:
+        dtt_staging_ccd_version: "{{ staging_ccd_vers_qry | first }}"
+      when: staging_ccd_vers_qry | length > 0
+      vars:
+        staging_ccd_vers_value: "[? key_name == 'staging_version'].key_value"
+        staging_ccd_vers_qry: "{{ product_configuration | json_query(staging_ccd_vers_value) }}"
+
+    - name: Assign Deployment Upgrade CCD Version from DTT Deployment Data if present
+      set_fact:
+        dtt_upgrade_ccd_version: "{{ upgrade_ccd_vers_qry | first }}"
+      when: upgrade_ccd_vers_qry | length > 0
+      vars:
+        upgrade_ccd_vers_value: "[? key_name == 'upgrade_version'].key_value"
+        upgrade_ccd_vers_qry: "{{ product_configuration | json_query(upgrade_ccd_vers_value) }}"
+
+    - name: Assign Deploymnt Type from DTT Deployment Data if present
+      set_fact:
+        dtt_deployment_type: "{{ dep_type__qry | first }}"
+      when: dep_type__qry | length > 0
+      vars:
+        dep_type_value: "[? key_name == 'ccd'].key_value"
+        dep_type__qry: "{{ product_configuration | json_query(dep_type_value) }}"
+
+    - name: Assign Deploymnt CCD Version from DTT Deployment Data if present
+      set_fact:
+        dtt_ccd_version: "{{ ccd_vers_qry | first }}"
+      when: ccd_vers_qry | length > 0
+      vars:
+        ccd_vers_value: "[? key_name == 'version'].key_value"
+        ccd_vers_qry: "{{ product_configuration | json_query(ccd_vers_value) }}"
+
+    - name: Assign Deployment CCD Flavor from DTT Deployment Data if present
+      set_fact:
+        dtt_ccd_flavor: "{{ ccd_flavor_qry | first  }}"
+      when: ccd_flavor_qry | length > 0
+      vars:
+        ccd_flavor_value: "[? key_name == 'ccdFlavor'].key_value"
+        ccd_flavor_qry: "{{ product_configuration | json_query(ccd_flavor_value) }}"
+
+    - name: Assign Deployment networkGGN from DTT Deployment Data if present
+      set_fact:
+        dtt_network_ggn: "{{ (network_ggn_qry | first).split('-') | first  }}"
+      when: network_ggn_qry | length > 0
+      vars:
+        network_ggn_value: "[? key_name == 'networkGGN'].key_value"
+        network_ggn_qry: "{{ product_configuration | json_query(network_ggn_value) }}"
+
+    - name: Assign Deployment vRouter from DTT Deployment Data if present
+      set_fact:
+        dtt_vrouter: "{{ (vrouter_qry | first).split('-') | first  }}"
+      when: vrouter_qry | length > 0
+      vars:
+        vrouter_value: "[? key_name == 'vrouter'].key_value"
+        vrouter_qry: "{{ product_configuration | json_query(vrouter_value) }}"
+
+    - name: Assign Deployment IP Version from DTT Deployment Data if present
+      set_fact:
+        dtt_ip_version: "{{ (ip_version_qry | first).split('-') | first  }}"
+      when: ip_version_qry | length > 0
+      vars:
+        ip_version_value: "[? key_name == 'ip_version'].key_value"
+        ip_version_qry: "{{ product_configuration | json_query(ip_version_value) }}"
+
+- name: DTT Vars Successfully Created
+  set_fact:
+    dtt_deployment_id: "{{ dtt_deployment._id }}"
+    dtt_vars_assigned: True

@@ -1,0 +1,197 @@
+## How To Use
+# (Default) Check if the deployment is cENM or not from ccd flavor. if it is undefined in ccd flavor,playbook will remove both cENM and non-cENM monitoring components.
+#   ansible-playbook cleanup-monitoring-components.yml -e deployment_id={ deployment_id }
+# For genernal monitoring (non-cENM)
+#   ansible-playbook cleanup-monitoring-components.yml -e deployment_id={ deployment_id } -e is_cenm=false
+# For cENM monitoring
+#   ansible-playbook cleanup-monitoring-components.yml -e deployment_id={ deployment_id } -e is_cenm=true
+---
+- name: monitoring
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  roles:
+    - deployment_id
+    - get_helm3_path
+    - get_kube_config
+
+  tasks:
+    - name: If is_cenm is not defined, source from CCD Flavor template
+      when:
+        - is_cenm is undefined
+      block:
+        - name: "Get Deployment '{{ deployment_id }}' from DTT"
+          include_role:
+            name: dtt
+
+        - name: Get CCD Flavor value from DTT Deployments CCD Product
+          set_fact:
+            ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+        - name: Get CCD Flavor Template file from Minio
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: templates
+            object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+            mode: getstr
+            ignore_nonexistent_bucket: True
+          register: ccd_flavor_template
+
+        - name: Import variables from CCD Flavor Template file
+          set_fact:
+            ccd_flavor_values: "{{ ccd_flavor_template.contents | from_yaml }}"
+
+        - name: If is_cenm is defined in ccd flavor template set parameter
+          set_fact:
+            is_cenm: "{{ ccd_flavor_values.parameters.is_cenm }}"
+          when:
+            - ccd_flavor_values.parameters.is_cenm is defined
+
+    - name: Uninstall Eventrouter from de-cni-monitoring namespace
+      include_role:
+        name: deploy_eventrouter
+        tasks_from: uninstall
+      vars:
+        namespace: de-cni-monitoring
+        release_name: de-cni-eventrouter
+
+    # Remove de-cni-prometheus
+    - name: Cleanup de-cni-prometheus with helm 3
+      community.kubernetes.helm:
+        binary_path: "{{ helm_path }}"
+        name: de-cni-prometheus
+        namespace: de-cni-monitoring
+        state: absent
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: result
+      failed_when:
+        - result.failed
+        - '"uninstallation completed" not in result.stderr'
+      tags:
+        - skip_ansible_lint
+
+
+    # Remove de-cni-prom-operator and monitoring crd for non-cENM monitorings
+    - name: Remove monitoring crd for non-cENM monitorings
+      when: is_cenm is not defined or not is_cenm | bool
+      block:
+        - name: Cleanup de-cni-prom-operator with helm 3
+          community.kubernetes.helm:
+            binary_path: "{{ helm_path }}"
+            name: de-cni-prom-operator
+            namespace: de-cni-monitoring
+            state: absent
+            kubeconfig: "{{ kubeconfig_path }}"
+            wait: true
+          tags:
+            - skip_ansible_lint
+
+        - name: Get list of CRDs
+          k8s_info:
+            api_version: v1
+            kind: CustomResourceDefinition
+            namespace: kube-system
+            kubeconfig: "{{ kubeconfig_path }}"
+          register: crd_list
+
+        - name: Remove monitoring CRDs
+          k8s:
+            state: absent
+            api_version: v1
+            kind: CustomResourceDefinition
+            name: "{{ item }}"
+            kubeconfig: "{{ kubeconfig_path }}"
+          with_items: "{{ crd_list.resources | map(attribute='metadata.name') | list }}"
+          when: '".monitoring.coreos.com" in item'
+
+
+    # Remove cENM monitoring components
+    - name: Remove ConfigMap and webhooks for cENM monitoring
+      when: is_cenm is not defined or is_cenm | bool
+      block:
+        - name: cENM - Remove ConfigMap prometheus-de-cni-prometheus-promethe-prometheus-rulefiles-0
+          k8s:
+            state: absent
+            api_version: v1
+            kind: ConfigMap
+            name: prometheus-de-cni-prometheus-kube-pro-prometheus-rulefiles-0
+            namespace: de-cni-monitoring
+            kubeconfig: "{{ kubeconfig_path }}"
+
+        - name: Get list of ValidatingWebhookConfiguration
+          k8s_info:
+            api_version: v1
+            kind: ValidatingWebhookConfiguration
+            kubeconfig: "{{ kubeconfig_path }}"
+          register: ValidatingWebhookConfiguration_list
+
+        - name: cENM - Remove ValidatingWebhookConfiguration de-cni-prometheus-promethe-admission
+          k8s:
+            state: absent
+            api_version: v1
+            kind: ValidatingWebhookConfiguration
+            name: "{{ item }}"
+            kubeconfig: "{{ kubeconfig_path }}"
+          with_items: "{{ ValidatingWebhookConfiguration_list.resources | map(attribute='metadata.name') | list }}"
+
+        - name: Get list of MutatingWebhookConfiguration
+          k8s_info:
+            api_version: v1
+            kind: MutatingWebhookConfiguration
+            kubeconfig: "{{ kubeconfig_path }}"
+          register: MutatingWebhookConfiguration_list
+
+        - name: cENM - Remove MutatingWebhookConfiguration de-cni-prometheus-promethe-admission
+          k8s:
+            state: absent
+            api_version: v1
+            kind: MutatingWebhookConfiguration
+            name: "{{ item }}"
+            kubeconfig: "{{ kubeconfig_path }}"
+          with_items: "{{ MutatingWebhookConfiguration_list.resources | map(attribute='metadata.name') | list }}"
+
+    # Remove secrets in de-cni-monitoring namespace
+    - name: Get list of secrets in de-cni-monitoring namespace
+      k8s_info:
+        api_version: v1
+        kind: secrets
+        kubeconfig: "{{ kubeconfig_path }}"
+        namespace: de-cni-monitoring
+      register: secrets_list
+
+    - name: Remove secrets in de-cni-monitoring namespace
+      k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        namespace: de-cni-monitoring
+        name: "{{ item }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      with_items: "{{ secrets_list.resources | map(attribute='metadata.name') | list }}"
+
+    # Remove de-cni-monitoring namespace
+    - name: Remove de-cni-monitoring namespace
+      k8s:
+        name: de-cni-monitoring
+        api_version: v1
+        kind: Namespace
+        state: absent
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    # Remove stable and prometheus-community helm repo
+    - name: Remove stable repo
+      community.kubernetes.helm_repository:
+        binary_path: "{{ helm_path }}"
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - stable
+        - prometheus-community
+      tags:
+        - skip_ansible_lint
+

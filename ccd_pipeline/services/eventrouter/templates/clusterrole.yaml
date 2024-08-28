@@ -1,0 +1,15 @@
+{{- if .Values.serviceAccount.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "eventrouter.fullname" . }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+   - events
+  verbs:
+    - get
+    - watch
+    - list
+{{- end }}

@@ -1,0 +1,68 @@
+pipeline {
+  agent {
+    node {
+      label 'cENM'
+    }
+  }
+  parameters{
+    string(defaultValue: 'stsvpXccdXX', name: 'deployment_id', trim: true)
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 40, unit: 'MINUTES')
+    timestamps()
+  }
+  stages {
+    stage('Set build name') {
+      steps {
+          script {
+	       currentBuild.displayName = "${env.BUILD_NUMBER} ${params.deployment_id}"
+          }
+      }
+    }
+    stage('Remove deployment from monitoring targets') {
+      steps {
+        sh """
+		git clone ssh://lciadm100@gerrit-gamma.gic.ericsson.se:29418/DETES/com.ericsson.de.stsoss/monitoring && scp -p -P 29418 lciadm100@gerrit-gamma.gic.ericsson.se:hooks/commit-msg monitoring/.git/hooks/
+		CCDNAME=${params.deployment_id}
+		cd monitoring
+		grep \${CCDNAME##*-} CMS/prometheus/prometheus_config/ccd-list.json && 
+			{ 
+			    cat CMS/prometheus/prometheus_config/ccd-list.json | grep -v \${CCDNAME##*-} > ccd-list.json.tmp
+				jq . ccd-list.json.tmp > /dev/null 2>&1 || 
+					{
+		                	        echo "wrong JSON format."
+                	        		exit 1
+					}
+		
+				mv ccd-list.json.tmp CMS/prometheus/prometheus_config/ccd-list.json
+			        git config --local user.email "lciadm100@ericsson.com"
+			        git config --local user.name "lciadm100"
+			        git add .
+			        git commit -m "Removing target ${params.deployment_id}" | grep nothing && echo "No changes made to targets skipping commit" || git push origin master 
+				
+                	} ||
+			{
+				echo "${params.deployment_id} doesn't exist in CCD targets"
+			}
+			echo "New ccd-list.json file"
+	        cat CMS/prometheus/prometheus_config/ccd-list.json
+		"""
+      }
+    }
+  }
+  // The post build actions
+  post {
+    always{
+        cleanWs disableDeferredWipeout: true
+    }
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}
+

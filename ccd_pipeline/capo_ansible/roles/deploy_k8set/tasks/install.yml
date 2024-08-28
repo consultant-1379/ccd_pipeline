@@ -1,0 +1,30 @@
+---
+
+- name: Get cloud name
+  set_fact:
+    cloud_name: "{{ deployment_id | regex_search('ccd-(c\\d+[abc])\\d+', '\\1') | first }}"
+
+- name: Set cloud-specific profile configuration and requirements if defined
+  set_fact:
+    k8set: "{{ lookup('vars', cfg, default=default_k8set) }}"
+  vars:
+    cfg: "{{ cloud_name }}_k8set"
+
+- name: Load profiles to run
+  set_fact:
+    profile_values: "{{ lookup('template', 'profiles.yml.j2') }}"
+
+- name: Install K8set
+  kubernetes.core.helm:
+    name: "{{ release_name }}"
+    chart_ref: ../services/k8set/chart
+    namespace: "{{ namespace }}"
+    create_namespace: yes
+    binary_path: "{{ helm_path }}"
+    kubeconfig_path: "{{ kubeconfig_path }}"
+    state: present
+    wait: yes
+    values:
+      profiles: "{{ profile_values }}"
+  tags:
+    - skip_ansible_lint

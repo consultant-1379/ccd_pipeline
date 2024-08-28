@@ -1,0 +1,17 @@
+---
+# Variables that all playbooks have access to.
+
+# Minio
+minio_access_key: minio
+minio_secret_key: sts@£$%22mini
+minio_url: http://minio.stsoss.seli.gic.ericsson.se:9000/
+# Minio
+minio_xdn_access_key: minio
+minio_xdn_secret_key: nm244!!4mini
+minio_xdn_url: http://10.145.159.150:9000/
+
+# DTT
+dtt_url: http://atvdtt.athtem.eei.ericsson.se
+
+# DIT
+dit_url: http://atvdit.athtem.eei.ericsson.se

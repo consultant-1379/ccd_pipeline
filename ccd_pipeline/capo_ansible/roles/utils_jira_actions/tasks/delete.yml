@@ -1,0 +1,26 @@
+---
+- name: Role Requirement, Ensure `jira_ticket` defined
+  assert:
+    that:
+      - jira_ticket is defined
+    fail_msg:
+      - "Required var `jira_ticket` not defined."
+      - "Exiting playbook!"
+    success_msg: "Required var defined."
+
+- name: Delete JIRA Issue
+  uri:
+    url: "{{ jira_url }}{{ jira_ticket }}"
+    user: "{{ jira_username }}"
+    password: "{{ jira_password }}"
+    method: DELETE
+    force_basic_auth: yes
+    status_code:
+      - 201
+      - 204
+    body_format: json
+  register: delete_result
+
+- name: Set the JIRA Delete Result
+  set_fact:
+    jira_delete_result: "{{ delete_result }}"

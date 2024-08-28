@@ -1,0 +1,28 @@
+---
+- name: Run health check on CCD cluster
+  hosts: localhost
+  gather_facts: no
+  vars:
+    inventory_path: "/var/lib/eccd/container-images.d/erikube/ansible/erikube"
+    extra_params:
+      ignore_alarm_list:
+        - Invalid License Alarm
+        - NeLS Connectivity Alarm
+  tasks:
+    - name: Get director host
+      include_role:
+        name: add_director_host
+
+    - name: Run healthcheck.yml on director
+      command: "ansible-playbook healthcheck.yml -e '{{ extra_params | to_json }}'"
+      become: yes
+      args:
+        chdir: "{{ inventory_path }}"
+      environment:
+        - ANSIBLE_INVENTORY: /mnt/config/inventory/ibd_inventory_file.ini
+      register: healthcheck_summary
+      changed_when: false
+      delegate_to: "{{ director_ip }}"
+
+    - debug:
+        msg: '{{ healthcheck_summary }}'

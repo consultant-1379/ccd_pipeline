@@ -1,0 +1,6 @@
+---
+prometheus_yaml: prometheus.yml
+prometheus_url_prefix: prom
+prometheus_url_domain: athtem.eei.ericsson.se
+prometheus_ccd_list_file: ccd-list.json
+dev_prometheus: false

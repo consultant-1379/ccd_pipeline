@@ -1,0 +1,12 @@
+---
+- name: Get Deployment DTT Vars
+  include_tasks: dtt.yml
+  when: "'dtt' in add_vars or 'dit' in add_vars or 'minio' in add_vars"
+
+- name: Get Deployment Minio Vars
+  include_tasks: minio.yml
+  when: "'minio' in add_vars"
+
+- name: Get Deployment DIT Vars
+  include_tasks: dit.yml
+  when: "'dit' in add_vars"

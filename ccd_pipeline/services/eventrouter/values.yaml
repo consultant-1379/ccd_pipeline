@@ -1,0 +1,85 @@
+# Default values for eventrouter
+
+image:
+  repository: armdocker.rnd.ericsson.se/sandbox/eventrouter_elastic
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  # If enabled, the required cluster role and binding will be automatically created
+  # If not enbabled, the service account specified in name must have the role and binding
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+resources:
+  limits:
+    cpu: 20m
+    memory: 64Mi
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+config:
+  ##
+  ## Glog sink - Log to stdout/err using glog log format
+  ##
+  sink: glog
+
+  ##
+  ## ElasticSearch sink - send events directly to external Elasticsearch
+  ##
+  # sink: elastic
+  ## Required parameters:
+  ##
+  ## Elastic search server URL, define full URL including port
+  # elasticURL: http://de-cni.athtem.eei.ericsson.se:9200
+  ## Optional parameters:
+  ##
+  ## Tag to include in event JSON. Cluster name for example.
+  # elasticTag: ""
+  ## Elasticsearch username
+  # elasticUser: ""
+  ## Elasticsearch password
+  # elasticPass: ""
+  ## Size of event buffer
+  # elasticBufSize: 1500
+  ## Boolean to discard events once buffer is filled instead of blocking
+  # elasticDiscard: true
+
+  ##
+  ## Stdout sink - Log to stdout/err using JSON format
+  ##
+  # sink: stdout
+  ## Optional parameters:
+  ##
+  ## Top level name to use for JSON object
+  # stdoutJSONNamespace

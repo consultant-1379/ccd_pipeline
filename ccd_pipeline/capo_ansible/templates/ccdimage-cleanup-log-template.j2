@@ -1,0 +1,8 @@
+##~## Cleaning up CCD images on OS Clouds - {{ date_for_log }} ##~##
+##~~~~~~~~~~~~~~~~## Summary ##~~~~~~~~~~~~~~~~##
+{% for item in images_deleted_by_cloud %}
+{% for image_deleted in item.deleted %}
+
+{{ date_for_log }} Cloud: {{ item.cloud }} DELETED IMAGE: {{ image_deleted }} 
+{% endfor %}
+{% endfor %}

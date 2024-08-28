@@ -1,0 +1,50 @@
+---
+- name: Search OpenStack for Network
+  os_networks_info:
+    auth: "{{ cloud_auth }}"
+    name: "{{ network }}"
+  register: network_search_results
+
+- name: Block for Disabling Network Port Security
+  when: network_search_results.openstack_networks | length == 1
+  block:
+    - name: Authenticate to OpenStack
+      uri:
+        method: POST
+        url: "{{ cloud_auth.auth_url }}/auth/tokens/"
+        body_format: json
+        body:
+          auth:
+            identity:
+              methods:
+                - password
+              password:
+                user:
+                  name: "{{ cloud_auth.username }}"
+                  password: "{{ cloud_auth.password }}"
+                  domain:
+                    id: default
+                    name: default
+            scope:
+              project:
+                id: "{{ cloud_auth.project_id }}"
+        return_content: yes
+        status_code: 201
+      register: authentication_result
+
+    - name: Disable Port Security for Network
+      uri:
+        method: PUT
+        url: '{{ cloud_url }}:13696/v2.0/networks/{{ searched_net_id }}'
+        body:
+          network:
+            port_security_enabled: false
+        body_format: json
+        return_content: yes
+        headers:
+          Accept: application/json
+          X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+        status_code: 200
+      vars:
+        cloud_url: "{{ cloud_auth.auth_url.split(':')[:2] | join(':') }}"
+        searched_net_id: "{{ (network_search_results.openstack_networks | first).id }}"

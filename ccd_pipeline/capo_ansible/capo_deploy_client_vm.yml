@@ -1,0 +1,373 @@
+---
+# Playbook to deploy a client VM on the relevant Openstack
+# for a passed in deployment_id
+#
+# Resources for Client VM deployed are specified in the following location:
+# - templates/capo_clientvm/capo_clientvm_flavors.j2
+# New Flavors can be added to file & will need to be commited to Repo with team approval via code review.
+#
+# Dependancies:
+# - Product Configuration Item 'client_vm' needs to be present on DTT for Deployment.
+#   > Format: 'true-<flavor>', 'deployed-<flavor>' (true if deploy/redeploy vm needed, deployed to do nothing)
+#   > Current Valid Flavors are ( client_medium, client_large )
+#   > Example: to deploy / redeploy a client VM, 'client_vm' would look as follows:
+#     - true-client_medium or true-client_large
+#   > Example: to keep existing client VM upon cluster reinstall, 'client_vm' would look as follows:
+#     - deployed-client_medium or deployed-client_large
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# NB: Vars files used in this playbook require ansible-vault decrypting
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook capo_deploy_client_vm.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook capo_deploy_client_vm.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Create Client VM for a Deployment
+  hosts: localhost
+  gather_facts: no
+  vars:
+    capo_clientvm_flavors: "{{ lookup('template', 'capo_clientvm_flavors.j2') | from_yaml }}"
+    vm_name: "{{ deployment_id | replace('ccd-','') }}_client"
+    build_server_image_location: /ccd/IMAGES/UBUNTU
+    ubuntu_image_repo_url: https://cloud-images.ubuntu.com/releases/focal/release
+    client_image: ubuntu-20.04-server-cloudimg-amd64.img
+    client_image_name: capo_client_ubuntu_20.04
+    true_bool: true
+  roles:
+    - role: utils_deployment_vars
+      vars:
+        login: yes
+    - role: capo_cluster_check
+    - role: creds
+      vars:
+        name: ubuntu
+        file: ubuntu.yml
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: yes
+  tasks:
+    - name: Block for when DTT Param 'client_vm' not present
+      when:
+        - dtt_clientvm_flavor is not defined
+        - dtt_clientvm_deploy is not defined
+      block:
+        - name: Param 'client_vm' not in DTT
+          debug:
+            msg:
+              - "Product configuration item 'client_vm' not in DTT."
+              - "Client VM will not be Deployed."
+              - "Nothing To Do Here."
+              - "Finishing Playbook."
+
+        - name: End playbook
+          meta: end_play
+
+    - name: Verify Valid Client VM Vars
+      assert:
+        that:
+          - dtt_clientvm_flavor in capo_clientvm_flavors
+          - dtt_clientvm_deploy in (true_bool,'true','deployed')
+        fail_msg:
+          - Failure. Product configuration item 'client_vm' has invalid value.
+          - Valid values are 'true-<flavor>', 'deployed-<flavor>'
+          - Flavors supported - {{ capo_clientvm_flavors.keys() | list }}.
+          - Please check deployment on DTT to ensure the 'client_vm' item is set correctly.
+          - Exiting Playbook.
+
+    - name: Delete Client VM Instance if Redeploy Specified
+      include_role:
+        name: osk_actions
+        tasks_from: "{{ item }}"
+      loop:
+          - delete_vm_instance
+          - delete_volume
+      vars:
+        instance_name: "{{ vm_name }}"
+        volume_name: "{{ vm_name }}-root"
+      when: dtt_clientvm_deploy in (true_bool,'true')
+
+    - name: Block to only Check for VM if not Redeploy
+      when: dtt_clientvm_deploy not in (true_bool,'true')
+      block:
+        - name: Check if Client VM Already Present
+          include_role:
+            name: osk_actions
+            tasks_from: search_vms
+          vars:
+            vm_pattern: "{{ vm_name }}"
+
+        - name: Block for when Client VM Already Present
+          when: osk_vm_results | length > 0
+          block:
+            - name: Output Client VM Information
+              debug:
+                msg:
+                  - "Client VM Already Present."
+                  - "VM Name: {{ (osk_vm_results|first).name }}"
+                  - "IP Address: {{ (osk_vm_results|first).accessIPv4 }}"
+                  - "Nothing To Do Here."
+                  - "Finishing Playbook."
+
+            - name: End playbook
+              meta: end_play
+
+    - name: Block to Ensure Client VM Image Present
+      delegate_to: "{{ build_server_ip }}"
+      block:
+        - name: Check is Client Image on Upgrade Build Server
+          find:
+            paths: "{{ build_server_image_location }}"
+            file_type: file
+            use_regex: yes
+            recurse: yes
+            patterns: "{{ client_image }}"
+          register: image_search_result
+
+        - name: Download Client Image to Upgrade Build Server
+          get_url:
+            url: "{{ ubuntu_image_repo_url }}/{{ client_image }}"
+            dest: "{{ build_server_image_location }}"
+            validate_certs: false
+          when: image_search_result.files | length == 0
+
+        - name: Verify Image Present on OpenStack
+          include_role:
+            name: osk_actions
+            tasks_from: upload_image
+          vars:
+            image_name: "{{ client_image_name }}"
+            image_file: "{{ build_server_image_location }}/{{ client_image }}"
+
+    - name: Perform Required OpenStack Actions
+      include_role:
+        name: osk_actions
+        tasks_from: "{{ item }}"
+      loop: "{{ osk_files }}"
+      vars:
+        osk_files: "{{
+          ['create_flavor','create_security_group','create_volume','enable_port_security','create_vm_instance','disable_port_security']
+          if vm_disk is not defined else
+          ['create_flavor','create_security_group','enable_port_security','create_vm_instance','disable_port_security']
+        }}"
+        flavor_name: "{{ capo_clientvm_flavors[dtt_clientvm_flavor].name }}"
+        ram: "{{ capo_clientvm_flavors[dtt_clientvm_flavor].ram }}"
+        vcpus: "{{ capo_clientvm_flavors[dtt_clientvm_flavor].vcpus }}"
+        flavor: "{{ capo_clientvm_flavors[dtt_clientvm_flavor] }}"
+        volume_name: "{{ vm_name }}-root"
+        volume_size: "{{ capo_clientvm_flavors[dtt_clientvm_flavor].storage }}"
+        disk: "{{ '0' if vm_disk is not defined else capo_clientvm_flavors[dtt_clientvm_flavor].storage }}"
+        image_name: "{{ client_image_name }}"
+        instance_name: "{{ vm_name }}"
+        network: "{{ deployment_env.infra.iaas.capo.oam_network.name }}"
+        volumes: "{{ vm_name+'-root' if vm_disk is not defined else [] }}"
+        security_group_name: "{{ deployment_id|replace('ccd-','') }}_open"
+        cloud_init_data: |
+          #cloud-config
+          ssh_pwauth: True
+          chpasswd:
+            list: |
+              {{ ubuntu.ubuntu_server_username }}:{{ ubuntu.ubuntu_server_password }}
+            expire: False
+
+    - name: Add The newly Created Client VM as Inventory Host Ubuntu
+      add_host:
+        group: client_vm_ubuntu
+        name: "{{ vm_name }}_ubuntu"
+        ansible_host: "{{ osk_vm_instance_results.server.accessIPv4 }}"
+        ansible_user: "{{ ubuntu.ubuntu_server_username }}"
+        ansible_ssh_pass: "{{ ubuntu.ubuntu_server_password }}"
+
+    - name: Add The newly Created Client VM as Inventory Host Eccd
+      add_host:
+        group: client_vm_eccd
+        name: "{{ vm_name }}_eccd"
+        ansible_host: "{{ osk_vm_instance_results.server.accessIPv4 }}"
+        ansible_user: eccd
+        ansible_ssh_pass: eccd
+
+    - name: Pause Play for 20 Seconds to Allow Instance to Fully Boot up
+      wait_for:
+        timeout: 20
+
+- name: Configure Client VM
+  hosts: client_vm_ubuntu
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Install kubectl with option --classic
+      snap:
+        name:
+          - kubectl
+        classic: true
+
+    - name: Create new Client VM User
+      user:
+        name: eccd
+        password: "{{ 'eccd' | password_hash('sha512', 'secret') }}"
+        shell: /bin/bash
+        groups: sudo
+
+    - name: Block for Mounting the Volume
+      when: vm_disk is not defined
+      vars:
+        partition: /dev/vdb
+        vol_group: share_vg
+        logical_vol: lv_data
+        mount_dir: /data
+      block:
+        - name: Create Partition
+          parted:
+            device: "{{ partition }}"
+            number: 1
+            flags: [ lvm ]
+            state: present
+
+        - name: Create Volume Group
+          lvg:
+            vg: "{{ vol_group }}"
+            pvs: "{{ partition }}1"
+
+        - name: Creating Logical Volume
+          lvol:
+            vg: "{{ vol_group }}"
+            lv: "{{ logical_vol }}"
+            size: 100%FREE
+
+        - name: Ensure Mount Directory Exists
+          file:
+            path: "{{ mount_dir }}"
+            state: directory
+            mode: '0755'
+
+        - name: Format the Filesystem
+          filesystem:
+            fstype: ext4
+            dev: /dev/{{ vol_group }}/{{ logical_vol }}
+
+        - name: Mount the Logical Volume
+          mount:
+            path: "{{ mount_dir }}"
+            src: /dev/{{ vol_group }}/{{ logical_vol }}
+            fstype: ext4
+            state: mounted
+
+- name: Configure Client VM
+  hosts: client_vm_eccd
+  gather_facts: no
+  vars:
+    controlplane_pem: "{{ hostvars.localhost.deployment_pem }}"
+    deployment_kubeconfig: "{{ hostvars.localhost.deployment_kubeconfig }}"
+    clientvm_deploy: "{{ hostvars.localhost.dtt_clientvm_deploy | lower }}"
+    clientvm_flavor: "{{ hostvars.localhost.dtt_clientvm_flavor | lower }}"
+  tasks:
+    - name: Update the Kube-api in the Kube Config
+      set_fact:
+        updated_kubeconfig: "{{ deployment_kubeconfig | combine({'clusters': [updated_config]}) }}"
+      vars:
+        api: "https://api.{{ deployment_id }}.athtem.eei.ericsson.se"
+        orig_config: "{{deployment_kubeconfig.clusters[0]}}"
+        config_data: "{{orig_config.cluster}}"
+        api_update: "{{ config_data | combine({'server': api})}}"
+        updated_config: "{{ orig_config | combine({'cluster': api_update}) }}"
+
+    - name: Ensure Directory /home/eccd/.kube Exists
+      file:
+        path: /home/eccd/.kube
+        state: directory
+
+    - name: Create the admin.conf & SSH Key Files
+      copy:
+        content: "{{ item.contents }}"
+        dest: "{{ item.file_path }}"
+        mode: "{{ item.file_permissions }}"
+      loop_control:
+        label: "{{ item.file_path }}"
+      loop:
+        - contents: "{{ updated_kubeconfig | to_yaml }}"
+          file_path: /home/eccd/.kube/config
+          file_permissions: 644
+        - contents: "{{ controlplane_pem }}"
+          file_path: /home/eccd/{{ deployment_id }}.controlplane.pem
+          file_permissions: 600
+
+    - name: Verify Deployment Connection via Created admin.conf
+      command: kubectl get nodes -o name
+      register: kube_result
+
+    - name: Final Validation to Confirm Successful Access to Deployment
+      assert:
+        that:
+          - not kube_result.failed
+          - kube_result.stdout_lines | length > 0
+        fail_msg :
+          - Failure. Issue connecting to Deployment using /etc/kubernetes/admin.conf
+          - Please Manually log into VM & verify its the correct admin.conf.
+          - ssh {{ ansible_user}}@{{ ansible_host }}
+          - Exiting Playbook.
+        success_msg: Connection to Deployment Successful, Playbook Complete!
+
+    - name: Block to Upload Updated KubeConfig File to MinIO
+      delegate_to: localhost
+      vars:
+        tmp_location: /tmp/{{ deployment_id }}_config
+      block:
+        - name: Create Temp Updated target_kubeconf.conf File
+          copy:
+            dest: "{{ tmp_location }}"
+            content: "{{ updated_kubeconfig | to_yaml }}"
+
+        - name: Upload Updated kubeconfig file into MinIO bucket
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            encrypt: no
+            bucket: de-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id}}.target_kubeconfig.conf
+            src: "{{ tmp_location }}"
+            mode: put
+            ignore_nonexistent_bucket: True
+
+        - name: Remove Temp Updated target_kubeconf.conf File
+          file:
+            path: "{{ tmp_location }}"
+            state: absent
+
+    - name: Update DTT Detailing Client VM Deployed
+      uri:
+        use_proxy: no
+        method: PUT
+        url: "{{ dtt_url }}/api/deployments/{{ dtt_deployment_id }}"
+        body: "{{ dtt_deployment | replace(change_from,change_to) }}"
+        body_format: json
+        return_content: yes
+        status_code: 200
+        headers:
+          Cookie: "{{ dtt_cookie }}"
+      retries: 1
+      delay: 3
+      vars:
+        dtt_url: "{{ hostvars.localhost.dtt_url }}"
+        dtt_deployment_id: "{{ hostvars.localhost.dtt_deployment_id }}"
+        dtt_deployment: "{{ hostvars.localhost.dtt_deployment }}"
+        dtt_cookie: "{{ hostvars.localhost.dtt_cookie }}"
+        change_from: "{{ clientvm_deploy }}-{{ clientvm_flavor }}"
+        change_to: "deployed-{{ clientvm_flavor }}"
+
+    - name: Output Client VM Information
+      debug:
+        msg:
+          - "Client VM Created."
+          - "VM Name. {{ inventory_hostname | replace('_eccd','') }}"
+          - "IP Address: {{ ansible_host }}"
+          - "To Access VM, 'ssh eccd@{{ ansible_host }}'"
+          - "kubeconfig located in /home/eccd/.kube"
+          - "Controlplane ssh key located in /home/eccd/"
+          - "Cluster Nodes:"
+          - "{{ kube_result.stdout_lines }}"

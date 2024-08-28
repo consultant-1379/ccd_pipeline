@@ -1,0 +1,7 @@
+---
+# Defaults can be overwritten when including this role in a play
+# Add all vars by default
+add_vars:
+  - dtt
+  - minio
+  - dit

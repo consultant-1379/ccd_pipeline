@@ -1,0 +1,30 @@
+pipeline {
+  agent {
+    node {
+      label 'ccd_pipeline_jenkins_agent'
+    }
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 40, unit: 'MINUTES')
+    timestamps()
+  }
+
+  stages {
+    stage('Cleanup DE-CNI monitoring from CCD') {
+      steps {
+        sh "cd ccd_pipeline/ansible; ansible-playbook -e deployment_id=${deployment_id} stsoss-cleanup-monitoring-components.yml -vvv"
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}

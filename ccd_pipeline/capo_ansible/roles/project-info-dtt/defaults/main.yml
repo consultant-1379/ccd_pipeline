@@ -1,0 +1,6 @@
+---
+# defaults file for project-info-dtt
+dtt_url: http://atvdtt.athtem.eei.ericsson.se
+dit_url: http://atvdit.athtem.eei.ericsson.se
+user_domain: default
+proj_domain: default

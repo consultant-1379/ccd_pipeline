@@ -1,0 +1,33 @@
+---
+- name: Download prometheus vip from minIO
+  hosts: localhost
+  vars:
+    prometheus_id: prometheus
+  vars_files: vars/group_vars/minio.yml
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Download {{ prometheus_id }}.yml from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: sts-cni
+        object: /ccd/{{ prometheus_id }}/{{ prometheus_id }}.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: creds_str
+
+    - name: Set prometheus credentials variables
+      set_fact:
+        creds: "{{ creds_str.contents|from_yaml }}"
+
+    - name: Set host to prometheus
+      add_host:
+        name: "{{ creds.prometheusvip }}"
+        ansible_ssh_user: "{{ creds.user }}"
+        ansible_ssh_pass: "{{ creds.pass }}"
+        groups: "{{ prometheus_id }}"
+
+    - debug:
+       msg: "host = {{ prometheus_id }} prometheusvip = {{ creds.prometheusvip }}"

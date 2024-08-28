@@ -1,0 +1,5 @@
+---
+# Default helm path for primary helm command (either 2 or 3)
+helm_binary: /usr/local/bin/helm
+# Path to helm 3 command when helm 2 is primary
+helm3_binary: /usr/local/bin/helm3

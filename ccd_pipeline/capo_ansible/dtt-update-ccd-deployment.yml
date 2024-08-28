@@ -1,0 +1,151 @@
+---
+- name: Ansible CCD to DTT Script
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost, atvdtt.athtem.eei.ericsson.se, object.athtem.eei.ericsson.se
+  vars:
+    s3_storage_url: "{{ minio_url }}/de-cni/ccd"
+
+# Additional required vars to be added when calling script:
+# - deployment_id: Name of the Deployment in DTT to be updated (with ccd- at the start)
+  roles:
+    - role: dtt
+      vars:
+        login: yes
+
+  tasks:
+  - name: Update CCD Deployment with Configuration in DTT
+    block:
+    - name: Create tmp files directory
+      file:
+        path: ./tmp
+        state: directory
+
+    - name: Save Deployment DTT ID as variable
+      set_fact:
+        deployment_dtt_id: '{{ dtt_deployment._id }}'
+
+    - name: Get Non-CCD Products with CCD Product-Type from Deployment Products list
+      set_fact:
+        non_ccd_products: "{{ dtt_deployment.products | json_query(products_qry) }}"
+      vars:
+        products_qry: "[? product_type_name != 'CCD']"
+
+    - name: Get Product with CCD Product-Type from Deployment Products list
+      set_fact:
+        ccd_product: "{{ dtt_deployment.products | json_query(products_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD']"
+
+    - name: Save CCD Products configuration ccdFlavor key-value as variable
+      set_fact:
+        ccd_flavor_name: "{{ ccd_product.configuration | json_query(config_qry) | first }}"
+      vars:
+        config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+    - name: Verify ccdFlavor is defined
+      fail:
+       msg: "The required configuration key 'ccdFlavor' is not defined within the CCD Product of Deployment {{ dtt_deployment_name }}"
+      when: ccd_flavor_name is not defined
+
+    - name: Download CCD Flavor Template file from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: ccd_flavor_template
+
+    - name: Import variables from flavor template file
+      set_fact:
+        template_vars: "{{ ccd_flavor_template.contents | from_yaml }}"
+
+    - name: Save CCD Version as variable
+      set_fact:
+        ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+    - name: Prepare Product Configuration JSON file
+      block:
+      - name: Copy Product Configuration JSON template file
+        copy:
+          src: json-files/product-configuration-template.json
+          dest: tmp/{{ deployment_id }}-new-configuration.json
+        delegate_to: localhost
+
+      - name: Insert Deployment Name to Product Configuration JSON file
+        replace:
+          path: tmp/{{ deployment_id }}-new-configuration.json
+          regexp: 'DEPLOYMENT_ID'
+          replace: '{{ deployment_id }}'
+
+      - name: Insert S3 Storage URL to Product Configuration JSON file
+        replace:
+          path: tmp/{{ deployment_id }}-new-configuration.json
+          regexp: 'S3_STORAGE_URL'
+          replace: '{{ s3_storage_url }}'
+
+      - name: Insert CCD Version to Product Configuration JSON file
+        replace:
+          path: tmp/{{ deployment_id }}-new-configuration.json
+          regexp: 'VERSION_VALUE'
+          replace: '{{ ccd_version }}'
+
+      - name: Insert CCD Installation type to Product Configuration JSON file
+        replace:
+          path: tmp/{{ deployment_id }}-new-configuration.json
+          regexp: 'CCD_INSTALL_TYPE'
+          replace: 'capo'
+
+
+    - name: "Update Deployment in DTT"
+      block:
+        - name: "Save Product Configuration JSON as variable"
+          set_fact:
+            updated_configuration: "{{ lookup('file', 'tmp/{{ deployment_id }}-new-configuration.json') | from_json }}"
+
+        - name: Get list of keys to exclude for config update
+          set_fact:
+            keys_to_exclude: "{{ updated_configuration | map(attribute='key_name') | list }}"
+
+        - name: Merge Updated Configuration with Base Product Configuration list
+          set_fact:
+            updated_configuration: "{{ updated_configuration + [item] }}"
+          loop: "{{ ccd_product.configuration }}"
+          when: item.key_name not in keys_to_exclude
+
+        - name: Update Deployment Product with merged configuration
+          set_fact:
+            updated_product: "{{ ccd_product | default([]) | combine({ 'configuration': updated_configuration}) }}"
+
+        - name: Merge Updated Product with Base Deployment Products list
+          set_fact:
+            updated_products: "{{ non_ccd_products + [updated_product] }}"
+
+        - name: Update Deployment with merged Products list
+          set_fact:
+            updated_deployment: "{{ dtt_deployment | default([]) | combine({ 'products': updated_products}) }}"
+
+        - name: "Update Deployment '{{ deployment_name }}' with updated CCD Product configuration in DTT"
+          uri:
+            use_proxy: no
+            method: PUT
+            url: "{{ dtt_url }}/api/deployments/{{ deployment_dtt_id }}"
+            body: "{{ updated_deployment }}"
+            body_format: json
+            return_content: yes
+            status_code: 200
+            headers:
+              Cookie: "{{ dtt_cookie }}"
+          retries: 1
+          delay: 3
+
+    always:
+    - name: Delete temp files directory
+      file:
+        path: ./tmp-files
+        state: absent

@@ -1,0 +1,210 @@
+- name: Implement DTT networking for CCD Initial Install
+  block:
+  - name: Download openstack credentials from MinIO
+    aws_s3:
+      aws_access_key: "{{ minio_xdn_access_key }}"
+      aws_secret_key: "{{ minio_xdn_secret_key }}"
+      s3_url: "{{ minio_xdn_url }}"
+      bucket: tools
+      object: openstack_creds.yml
+      mode: getstr
+      ignore_nonexistent_bucket: True
+    register: openstack_access
+  - name: Import variables from openstack creds file
+    #no_log: yes
+    set_fact:
+      openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+  
+  - name: Set openstack username and password vars from openstack creds var
+    #no_log: yes
+    set_fact:
+      openstack_user: "{{ openstack_access_vars.openstack_user }}"
+      openstack_password: "{{ openstack_access_vars.openstack_password }}"
+      openstack_projectname: "{{ openstack_access_vars.openstack_projectname }}"
+  
+  - name: Check for DTT Traffic Network end user selection
+    set_fact:
+      workers_network_selection: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].configuration"
+      config_qry: "[? key_name == 'networkTraffic'].key_value"
+      ignore_errors: yes
+  
+  - name: Process DTT networkTraffic end user selection for IPV4
+    when: (workers_network_selection is defined) and (ip_version != "ipv6")
+    block:
+      - name: Check DTT Traffic Network value
+        when: workers_network_selection is defined
+        fail:
+          msg: "{{ workers_network_selection }} not a valid entry for DTT Workers Network"
+        when: "not workers_network_selection.startswith('ProviderNetwork-')"
+      
+      - name: "Check cloud for existing Traffic network"
+        openstack.cloud.networks_info:
+          verify: no
+          auth:
+            auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: "{{ openstack_projectname }}"
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ workers_network_selection }}" 
+        register: result
+        
+      - name: Set Traffic network ID
+        set_fact:
+          traffic_network: "{{ result.networks.0.id }}"
+            
+     
+      - name: "Check cloud for existing Traffic subnet"
+        openstack.cloud.subnets_info:
+          verify: no
+          auth:
+            auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: "{{ openstack_projectname }}"
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ workers_network_selection }}-IPv4"
+        register: result
+        
+      - name: Set Traffic subnet ID
+        set_fact:
+          traffic_subnet: "{{ result.subnets.0.id }}"
+     
+         
+      - name: Set Traffic subnet GW
+        set_fact:
+          traffic_gw: "{{ result.subnets.0.gateway_ip }}"   
+      - name: Split traffic IP
+        set_fact: 
+          traffic_gw_split: "{{ traffic_gw.split('.') }}"
+      - name: Set IP for HSRP-a and HSRP-b
+        set_fact:
+          traffic_gw_hsrp_a: "{{ ( traffic_gw_split[0] + '.' + traffic_gw_split[1] + '.' + traffic_gw_split[2] ) + '.' + (traffic_gw_split[3]|int +1)|string}}"
+          traffic_gw_hsrp_b: "{{ ( traffic_gw_split[0] + '.' + traffic_gw_split[1] + '.' + traffic_gw_split[2] ) + '.' + (traffic_gw_split[3]|int +2)|string}}"
+ 
+  - name: Process DTT networkTraffic end user selection for IPV6
+    when: (workers_network_selection is defined) and ((ip_version == "ipv6") or (ip_version == "dual_stack"))
+    block:
+      - name: Check DTT Traffic Network value
+        when: workers_network_selection is defined
+        fail:
+          msg: "{{ workers_network_selection }} not a valid entry for DTT Workers Network"
+        when: "not workers_network_selection.startswith('ProviderNetwork-')"
+      
+      - name: "Check cloud for existing Traffic network"
+        openstack.cloud.networks_info:
+          verify: no
+          auth:
+            auth_url: "{{ dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: "{{ openstack_projectname }}"
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ workers_network_selection }}" 
+        register: result
+        
+      - name: Set Traffic network ID
+        set_fact:
+          traffic_network: "{{ result.networks.0.id }}"
+
+      
+      - name: "Check cloud for existing Traffic subnet"
+        openstack.cloud.subnets_info:
+          verify: no
+          auth:
+            auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: "{{ openstack_projectname }}"
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ workers_network_selection }}-IPv6"
+        register: result
+        
+      - name: Set Traffic subnet ID
+        set_fact:
+          traffic_subnet_ipv6: "{{ result.subnets.0.id }}"
+       
+          
+      - name: Set Traffic subnet GW
+        set_fact:
+          traffic_gw_ipv6: "{{ result.subnets.0.gateway_ip }}"   
+      - name: Set IP for HSRP-a and HSRP-b
+        set_fact:
+          traffic_gw_hsrp_a_ipv6: "{{ (traffic_gw | ipaddr('int') + 1) | ipaddr }}"
+          traffic_gw_hsrp_b_ipv6: "{{ (traffic_gw | ipaddr('int') + 2) | ipaddr }}"
+ 
+  - name: Check for DTT OAM Network end user selection
+    set_fact:
+      directors_network_selection: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].configuration"
+      config_qry: "[? key_name == 'networkOAM'].key_value"
+      ignore_errors: yes
+  
+  - name: Process DTT networkOAM end user selection
+    when: directors_network_selection is defined
+    block:         
+      - name: Check DTT OAM Network value
+        when: directors_network_selection is defined
+        fail:
+          msg: "{{ directors_network_selection }} not a valid entry for DTT OAM Network"
+        when: "not directors_network_selection.startswith('ProviderNetwork-')"
+      
+      - name: "Check cloud for existing OAM network"
+        openstack.cloud.networks_info:
+          verify: no
+          auth:
+            auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: "{{ openstack_projectname }}"
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ directors_network_selection }}"
+        register: result
+        
+      - name: Set OAM network ID
+        set_fact:
+          oam_network: "{{ result.networks.0.id }}"
+
+      - name: "Check cloud for existing OAM subnet"
+        openstack.cloud.subnets_info:
+          verify: no
+          auth:
+            auth_url: "{{ deployment_data.dit_pod.authUrl }}"
+            username: "{{ openstack_user }}"
+            password: "{{ openstack_password }}"
+            project_name: stsccdpipeline
+            project_domain_name: Default
+            user_domain_name: Default
+          name: "{{ directors_network_selection }}-IPv4"
+        register: result
+  
+      - name: Set OAM subnet ID
+        set_fact:
+          oam_subnet: "{{ result.subnets.0.id }}"
+        
+          
+  - name: Check for DTT BGP myASN end user selection
+    set_fact:
+      bgp_my_asn: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].configuration"
+      config_qry: "[? key_name == 'BGPmyASN'].key_value"
+    ignore_errors: yes
+
+  - name: Process DTT BGP myASN end user selection
+    when: bgp_my_asn is defined
+    block:         
+      - name: Check DTT BGP myASN value
+        when: bgp_my_asn is defined
+        fail:
+          msg: "{{ bgp_my_asn }} not a valid entry for DTT BGPmyASN"
+        when: bgp_my_asn is not regex("^[0-9]*$")
+

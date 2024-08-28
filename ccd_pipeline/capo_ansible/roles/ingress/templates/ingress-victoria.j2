@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+  generation: 1
+  labels:
+  name: victoria-sts
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: prom.{{dtt_deployment.name }}.stsoss.{{ dit_project_location }}.gic.ericsson.se
+    http:
+      paths:
+      - backend:
+          service:
+            name: eric-victoria-metrics-cluster-vmselect
+            port:
+              number: 8481
+        path: /
+        pathType: Prefix

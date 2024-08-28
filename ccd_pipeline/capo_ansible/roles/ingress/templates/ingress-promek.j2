@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+  generation: 1
+  labels:
+  name: prometheush-sts
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: prom.{{dtt_deployment.name }}.stsoss.{{ dit_project_location }}.gic.ericsson.se
+    http:
+      paths:
+      - backend:
+          service:
+            name: eric-pm-server-external
+            port:
+              number: 9090
+        path: /
+        pathType: Prefix
+

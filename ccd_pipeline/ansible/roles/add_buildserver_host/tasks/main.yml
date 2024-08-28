@@ -1,0 +1,37 @@
+---
+# Get build server access details from Minio
+# Host is added using build_server_ip
+
+- name: Get Minio credentials
+  include_vars: vars/group_vars/minio.yml
+  no_log: true
+
+- name: Get build server details
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: tools
+    object: build_server.yml
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  changed_when: no
+  register: build_server
+
+- name: Parse YAML response
+  no_log: yes
+  set_fact:
+    build_server_vars: "{{ build_server.contents | from_yaml }}"
+
+- name: Set build server IP
+  set_fact:
+    build_server_ip: "{{ build_server_vars.build_server_ip }}"
+
+- name: Add build server host
+  no_log: yes
+  add_host:
+    name: "{{ build_server_ip }}"
+    ansible_ssh_user: "{{ build_server_vars.build_server_username }}"
+    ansible_ssh_pass: "{{ build_server_vars.build_server_password }}"
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+    ansible_connection: "ssh"

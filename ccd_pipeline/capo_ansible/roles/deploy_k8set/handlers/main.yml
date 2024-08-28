@@ -1,0 +1,5 @@
+---
+- name: End port-forward to K8set service
+  command: pkill -f 'kubectl port-forward'
+  register: pkill_res
+  failed_when: pkill_res.rc not in [0, 1] # Don't fail if no process found

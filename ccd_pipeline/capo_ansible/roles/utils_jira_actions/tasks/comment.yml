@@ -1,0 +1,24 @@
+---
+- name: Role Requirement, Ensure `jira_ticket` Defined
+  assert:
+    that:
+      - jira_ticket is defined
+    fail_msg:
+      - "Required vars `jira_ticket` not defined."
+      - "Example: CIS-123456"
+      - "Exiting playbook!"
+    success_msg: "Required var defined."
+
+- name: Comment on JIRA Issue
+  jira:
+    uri: '{{ jira_module_url }}'
+    username: '{{ jira_username }}'
+    password: '{{ jira_password }}'
+    issue: '{{ jira_ticket }}'
+    operation: comment
+    comment: "{{ comment }}"
+  register: comment_result
+
+- name: Set the JIRA Comment Result
+  set_fact:
+    jira_comment_result: "{{ comment_result.meta }}"

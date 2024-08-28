@@ -1,0 +1,67 @@
+---
+- name: Retrieve Deployment VIP File Contents
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: de-cni
+    object: /ccd/{{ deployment_id }}/{{ deployment_id }}.{{ file_to_fetch }}.yml
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  register: deployment_vip_file
+  vars:
+    file_to_fetch: "{{
+      'controlplanevip' if dtt_deployment_type is defined and dtt_deployment_type in ('capo')
+      else 'directorvip'
+    }}"
+
+- name: Retrieve Deployment PEM File Contents
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: de-cni
+    object: /ccd/{{ deployment_id }}/{{ deployment_id }}.{{ file_to_fetch }}.pem
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  register: deployment_pem_file
+  vars:
+    file_to_fetch: "{{
+      'controlplane' if dtt_deployment_type is defined and dtt_deployment_type in ('capo')
+      else 'director'
+    }}"
+
+- name: Retrieve Deployment KubeConfig File Contents
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: de-cni
+    object: /ccd/{{ deployment_id }}/{{ deployment_id }}.{{ file_to_fetch }}.conf
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  register: deployment_kube_file
+  vars:
+    file_to_fetch: "{{
+      'target_kubeconfig' if dtt_deployment_type is defined and dtt_deployment_type in ('capo')
+      else 'admin'
+    }}"
+
+- name: Retrieve Deployment ENV File Contents
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: de-cni
+    object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+    mode: getstr
+    ignore_nonexistent_bucket: True
+  register: deployment_env_file
+
+- name: Set the Role Deployment Minio vars
+  set_fact:
+    minio_vars_assigned: True
+    deployment_vip: "{{ deployment_vip_file.contents |replace(('\n'),'') |replace('controlplanevip','') |replace('directorvip','') |replace('---:','')|trim }}"
+    deployment_pem: "{{ deployment_pem_file.contents }}"
+    deployment_kubeconfig: "{{ deployment_kube_file.contents | from_yaml }}"
+    deployment_env: "{{ deployment_env_file.contents | from_yaml }}"

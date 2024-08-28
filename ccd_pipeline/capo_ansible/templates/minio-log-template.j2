@@ -1,0 +1,26 @@
+##~## MinIO Checks : {{ date_for_log }}    ##~##
+##~~~~~~~~~~~~~~~~## Summary ##~~~~~~~~~~~~~~~~##
+Deployments:
+  - On MinIO not DTT: {{ in_minio_not_dtt_deps|length }}
+  - On DTT not MinIO: {{ in_dtt_not_minio_deps|length }}
+Flavors:
+  - On MinIO not DTT: {{ in_minio_not_dtt_flav|length }}
+  - On DTT not MinIO: {{ in_dtt_not_minio_flav|length }}
+##~~~~~~~~~~~~~~## Deployments ##~~~~~~~~~~~~~~##
+{% for deployment in in_minio_not_dtt_deps %}
+[{{ date_for_log }}][INFO][{{ deployment }}] Deployment present on MinIO but no entry on DTT.
+{% endfor %}
+{% for deployment in in_dtt_not_minio_deps %}
+[{{ date_for_log }}][WARNING][{{ deployment }}] Deployment present on DTT but no entry on MinIO.
+{% endfor %}
+##~~~~~~~~~~~~~~~~## Flavors ##~~~~~~~~~~~~~~~~##
+{% for flavor in in_minio_not_dtt_flav %}
+[{{ date_for_log }}][INFO][{{ flavor }}] Flavor from MinIO not used by any CCD entry on DTT.
+{% endfor %}
+{% for deployment in dtt_deployment_resp.json %}
+{% for flavor in in_dtt_not_minio_flav %}
+{% if flavor in deployment | to_json %}
+[{{ date_for_log }}][WARNING][{{ flavor }}] Flavor present on entry on DTT ( {{ deployment.name }} ) but no entry on MinIO.
+{% endif %}
+{% endfor %}
+{% endfor %}

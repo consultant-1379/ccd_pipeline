@@ -1,0 +1,138 @@
+# Check if required images exist in OpenStack. If not, upload from build server.
+
+- hosts: localhost
+  gather_facts: no
+  vars:
+    dit_url: http://atvdit.athtem.eei.ericsson.se
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - dtt
+  tasks:
+    - name: Get DIT Project Link from DTT Deployments CCD Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: '{{ dit_project_link }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: '{{ get_dit_project.json }}'
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: '{{ dit_url }}/api/pods/{{ dit_project.pod_id }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Cloud as variable
+      set_fact:
+        dit_pod: '{{ get_dit_pod.json }}'
+
+    - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+      set_fact:
+        ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+    - name: Get CCD Flavor Template file from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: ccd_flavor_template
+
+    - name: Import variables from flavor template file
+      set_fact:
+        template_vars: "{{ ccd_flavor_template.contents|from_yaml }}"
+
+    - name: Save ccd version into variable on local
+      set_fact:
+        ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+
+    - name: Upload images to XDN SFTP
+      block:
+        - name: Add build server host
+          include_role:
+            name: add_buildserver_host
+
+        - name: Find CCD {{ ccd_version }} image paths
+          find:
+            paths: /proj/ossststools/ECCD/IMAGES
+            file_type: directory
+            use_regex: yes
+            recurse: no
+            patterns: ".*{{ ccd_version }}.*"
+          register: ccd_dir 
+
+          failed_when: ccd_dir.matched == 0
+          delegate_to: "{{ build_server_ip }}"
+
+        - name: Check if file exists on XDN SFTP
+          shell: "lftp -u {{ sftp_user }},{{ sftp_password }} -e 'ls /gwmrenm/ccd_pipeline/images/;exit' sftp://{{ sftp_host }}"
+          register: sftp_result
+          ignore_errors: yes
+          delegate_to: "{{ build_server_ip }}"
+        
+        - name: Display sftp_result
+          debug:
+            var: sftp_result
+
+        - name: Register file_name 
+          set_fact:
+            file_name: "{{ ccd_dir.files[0].path | basename }}.tgz"
+
+        - name: TGZ file {{ file_name }}
+          archive:
+            path: /proj/ossststools/ECCD/IMAGES/{{ ccd_dir.files[0].path | basename }}
+            dest: /tmp/{{ file_name }}
+            format: gz
+          when: sftp_result.stdout_lines | select('search', file_name) | list | length == 0
+          delegate_to: "{{ build_server_ip }}"
+
+        - name: Upload {{ ccd_dir.files[0].path | basename }}.tgz to XDN images 
+          command:  >
+            lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+            'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+            put /tmp/{{ file_name }} -o ccd_pipeline/images/{{ file_name }};exit' 
+            sftp://{{ sftp_host }}
+          when: sftp_result.stdout_lines | select('search', file_name) | list | length == 0
+          delegate_to: "{{ build_server_ip }}"
+          register: sftp_result_upload
+        
+        - name: Debug SFTP result of upload
+          debug:
+            var: sftp_result_upload
+          
+        - name: Remove local file /tmp/{{ file_name }}
+          file:
+            path: "/tmp/{{ file_name }}"
+            state: absent
+          delegate_to: "{{ build_server_ip }}"

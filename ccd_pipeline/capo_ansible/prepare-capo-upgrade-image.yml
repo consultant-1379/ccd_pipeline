@@ -1,0 +1,79 @@
+---
+# Playbook to Validate a specified Upgrade Build Version Image of CAPO.
+# Upgrade Version fetched from a deployment_id DTT Entry.
+#
+# Playbook will Check if the Upgrade Version Image is Present on Build Server
+# - If Present: Playbook Completes Successfully
+# - If Not Present: Fail Playbook
+#
+# This playbook is used as part of the Upgrade pipeline.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# NB: Vars files used in this playbook require ansible-vault decrypting
+#
+# NB: The expectation is that the capo_praprgfastfeedback pipeline has successfully completed,
+#     before the capo_upgrade pipeline can run on the Upgrade Build Version of CAPO.
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook prepare-capo-upgrade-image.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook prepare-capo-upgrade-image.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Prepare CCD Upgrade Images
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  roles:
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: yes
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+  tasks:
+    - name: Verify CCD Version & Upgrade Version defined
+      assert:
+        that:
+          - dtt_ccd_version is defined
+          - dtt_upgrade_ccd_version is defined
+        fail_msg:
+          - Either CCD Version or Upgrade Version not present on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Please verify product configuration contains 'version' & 'upgrade_version'
+
+    - name: Ensure CAPO Upgrade version Image exists on build server
+      delegate_to: "{{ build_server_ip }}"
+      block:
+        - name: Check if capo-{{ dtt_upgrade_ccd_version }} Image in '{{ capo_image_path }}' Directory
+          find:
+            paths: '{{ capo_image_path }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-{{ dtt_upgrade_ccd_version }}.*$"
+          register: upgrade_image_search
+
+        - name: Verify 'capo-{{ dtt_upgrade_ccd_version }}' Image Found
+          assert:
+            that: upgrade_image_search.files | length > 0
+            fail_msg:
+              - Unable to Locate Image 'capo-{{ dtt_upgrade_ccd_version }}'
+              - Location Searched - '{{ capo_image_path }}'
+              - This Suggests Pipeline 'capo_praprgfastfeedback' has not been ran using this Image.
+              - Image 'capo-{{ dtt_upgrade_ccd_version }}' needs to be Verified in the 'capo_praprgfastfeedback' Pipeline.
+              - Upgrade Pipeline Requires the 'capo_praprgfastfeedback' Pipeline Successfully Complete.
+
+        - name: capo-{{ dtt_upgrade_ccd_version }} Already Present in {{ capo_image_path }}
+          debug:
+            msg:
+              - Upgrade Version {{ dtt_upgrade_ccd_version }} Already present.
+              - Image Location - {{ (upgrade_image_search.files | first).path }}
+              - Can Proceed with Upgrade.
+              - Exiting Playbook!
+
+        - name: End Play
+          meta: end_play

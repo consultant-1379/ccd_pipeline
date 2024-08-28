@@ -1,0 +1,12 @@
+ansible>=2.10
+boto
+boto3
+botocore
+openshift==0.11.1
+PyYAML>=3.13
+pyhelm
+grpcio
+dnspython
+openstacksdk
+netaddr
+pexpect

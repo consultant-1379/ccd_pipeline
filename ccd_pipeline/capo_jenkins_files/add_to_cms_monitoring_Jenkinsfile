@@ -1,0 +1,85 @@
+pipeline {
+  agent {
+    node {
+      label 'capo_pipeline_jenkins_agent'
+    }
+  }
+  parameters{
+    string(defaultValue: 'stsvpXccdXX', name: 'deployment_id', trim: true)
+  }
+
+  environment {
+    VAULT_FILE = credentials('ccd_pipeline_secret')
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 40, unit: 'MINUTES')
+    timestamps()
+  }
+  stages {
+    stage('Set build name') {
+      steps {
+          script {
+	       currentBuild.displayName = "${env.BUILD_NUMBER} ${params.deployment_id}"
+          }
+      }
+    }
+    stage('Add deployment to monitoring') {
+      steps {
+        sh "cd ccd_pipeline/capo_ansible; ansible-playbook -e deployment_id=${params.deployment_id} --vault-password-file $VAULT_FILE enable-prometheus-ingress.yaml -vvv"
+      }
+    }
+    stage('Add deployment to monitoring targets') {
+      steps {
+        sh "ls /tmp/"
+        sh "cat /tmp/target.json"
+        sh "git clone ssh://lciadm100@gerrit-gamma.gic.ericsson.se:29418/DETES/com.ericsson.de.stsoss/monitoring && scp -p -P 29418 lciadm100@gerrit-gamma.gic.ericsson.se:hooks/commit-msg monitoring/.git/hooks/"
+        
+        dir("monitoring"){
+            addTargetIfMssing("/tmp/target.json")
+            pushToGerrit()
+        }
+      }
+    }
+  }
+  // The post build actions
+  post {
+    always{
+        cleanWs disableDeferredWipeout: true
+        sh "rm /tmp/target.json; rm /tmp/ingress.yaml"
+    }
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}
+
+def addTargetIfMssing(String target_file){
+    sh """
+    fqdn=\$(cat  ${target_file}  | awk -F \"[\" \'{print \$2}\'| awk -F "\\"" \'{print \$2}\')
+    cat CMS/prometheus/prometheus_config/ccd-list.json | grep "\$fqdn" && echo "Already in targets" || {
+                echo OK
+                cat CMS/prometheus/prometheus_config/ccd-list.json | sed "2i\\    \$(cat ${target_file})" > ccd-list.json.tmp
+                jq . ccd-list.json.tmp > /dev/null 2>&1 || {
+                        echo "wrong JSON format."
+                        exit 1
+                }
+                mv ccd-list.json.tmp CMS/prometheus/prometheus_config/ccd-list.json
+                }
+        cat CMS/prometheus/prometheus_config/ccd-list.json
+    """
+    return true
+}
+
+def pushToGerrit(){
+    sh """
+	git config --local user.email "lciadm100@ericsson.com"
+        git config --local user.name "lciadm100"
+        git add .
+        git commit -m "Adding new target ${params.deployment_id}" | grep nothing && echo "No changes made to targets skipping commit" || git push origin master   """ 
+}
+

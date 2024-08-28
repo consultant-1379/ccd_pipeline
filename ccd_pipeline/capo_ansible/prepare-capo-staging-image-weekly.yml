@@ -1,0 +1,145 @@
+---
+# Playbook to pull down & extract the last successful weekely pre-build of CAPO.
+# This playbook is used as part of the staging pipeline.
+#
+# Playbook will pull down & extract the image from artifactory to the Upgrade Build Server
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook prepare-capo-staging-image-weekly.yml --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook prepare-capo-staging-image-weekly.yml --vault-password-file /path/to/file
+#
+- hosts: localhost
+  gather_facts: no
+  vars:
+    build_jenkins_url: https://fem1s10-eiffel018.eiffel.gic.ericsson.se:8443
+    build_artifact_file: /jenkins/view/ADP/job/capo-staging-trigger/lastSuccessfulBuild/artifact/artifact.properties/
+    capo_image_path: /ccd/IMAGES
+    staging_dir : STAGING
+  roles:
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: yes
+    - role: capo_check_image_override
+      vars:
+        capo_image_override: staging
+  tasks:
+    - name: Block for when no Override Specified
+      when:
+        - image_url is not defined
+        - image_version is not defined
+      block:
+        - name: Check for latest Successful CCD build URL
+          uri:
+            method: GET
+            url: "{{ build_jenkins_url }}{{ build_artifact_file }}"
+            return_content: yes
+            status_code: 200
+          register: release_files
+
+        - name: Set the latest CAPO pre-build Atrifact Vars
+          set_fact:
+            image_url: "{{ (find_url | first).split('=') | last }}"
+            image_version: "{{ (find_version | first).split('=') | last }}"
+          when:
+            - find_url | length == 1
+            - find_version | length == 1
+          vars:
+            artifact_list: "{{(release_files.content|lower).split('\n')}}"
+            find_url: '{{ artifact_list | select("match", ".*artifact_url.*") | list }}'
+            find_version: '{{ artifact_list | select("match", ".*artifact_version.*") | list }}'
+
+    - name: Ensure the Latest Version Values have been Assigned
+      assert:
+        that:
+          - image_url is defined
+          - image_version is defined
+        fail_msg:
+          - vars 'image_url' & 'image_version' are not defined.
+          - It is required they be set for this playbook to continue.
+          - Please Verify Latest Image Version.
+
+    - name: Ensure CAPO staging drop version exists on build server
+      delegate_to: "{{ build_server_ip }}"
+      when:
+        - image_url is defined
+        - image_version is defined
+      block:
+        - name: Ensure directory '{{ capo_image_path }}/{{ staging_dir }}' exists on build server
+          file:
+            path: '{{ capo_image_path }}/{{ staging_dir }}'
+            state: directory
+
+        - name: Check if capo-{{ image_version }} directory already in '{{ capo_image_path }}/{{ staging_dir }}'
+          find:
+            paths: '{{ capo_image_path }}/{{ staging_dir }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-{{ image_version }}.*$"
+          register: staging_image_path
+
+        - name: Verify {{ capo_image_path }}/{{ staging_dir }}/capo-{{ image_version }} Does Not Already Exist
+          assert:
+            that: staging_image_path.files | length == 0
+            fail_msg:
+              - Image for capo-{{ image_version }} already present on Build Server.
+              - Found Image - {{ staging_image_path.files | json_query('[*].path') }}
+              - This Indicates that the capo_staging pipeline has already ran against this pre-release version.
+              - It is likely the staging cluster is already deployed on this version.
+              - Please check the version of the staging cluster.
+              - Exiting Playbook!
+
+        - name: Create the CAPO staging version {{ image_version }} in '{{ capo_image_path }}/{{ staging_dir }}'
+          file:
+            path: '{{ capo_image_path }}/{{ staging_dir }}/capo-{{ image_version }}'
+            state: directory
+
+        - name: Check if capo-{{ image_version }} directory already in '{{ capo_image_path }}'
+          find:
+            paths: '{{ capo_image_path }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-{{ image_version }}.*$"
+          register: image_path
+
+        - name: Copy {{ capo_image_path }}/capo-{{ image_version }} to {{ capo_image_path }}/{{ staging_dir }}
+          copy:
+            remote_src: true
+            src: '{{ capo_image_path }}/capo-{{ image_version }}/'
+            dest: '{{ capo_image_path }}/{{ staging_dir }}/capo-{{ image_version }}'
+          when: image_path.files | length > 0
+
+        - name: Download and extract CAPO staging drop version {{ image_version }} tar file
+          unarchive:
+            src: '{{ image_url }}'
+            dest: '{{ capo_image_path }}/{{ staging_dir }}/capo-{{ image_version }}'
+            remote_src: yes
+            extra_opts:
+              # Strip out the top level CXP dir
+              - --strip-components=1
+          when: image_path.files | length == 0
+
+        - name: Search for any old versions in '{{ capo_image_path }}/{{ staging_dir }}'
+          find:
+            paths: '{{ capo_image_path }}/{{ staging_dir }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-.*$"
+          register: images_to_move
+
+        - name: Block for when there are old Images
+          when: images_to_move.files | length > 0
+          block:
+            - name: Create Backup Directory 'BKUP' in '{{ capo_image_path }}/{{ staging_dir }}' to House Old Image
+              file:
+                path: '{{ capo_image_path }}/{{ staging_dir }}/BKUP'
+                state: directory
+
+            - name: Move Old Images to {{ capo_image_path }}/{{ staging_dir }}/BKUP
+              command: mv {{ item.path }} {{ capo_image_path }}/{{ staging_dir }}/BKUP/
+              changed_when: no
+              loop: "{{ images_to_move.files }}"
+              when: image_version not in item.path

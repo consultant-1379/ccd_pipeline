@@ -1,0 +1,25 @@
+---
+- name: Update 'state' of the image override file
+  set_fact:
+    updated_content: "{{ file_content | combine({capo_image_override: override_content }) }}"
+  vars:
+    file_content: "{{ override_file_content.contents | from_yaml }}"
+    override_content: "{{ file_content[capo_image_override] | replace('Active', 'Done') }}"
+
+- name: Create tmp Updated image_overrides File
+  copy:
+    dest: tmp_image_override.yml
+    content: "{{ updated_content | to_nice_yaml(indent=2) }}"
+
+- name: Upload image_overrides Files to MinIO
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    encrypt: no
+    bucket: de-cni
+    object: /capo_image_override/image_overrides.yml
+    src: tmp_image_override.yml
+    mode: put
+    ignore_nonexistent_bucket: True
+  notify: Remove Tmp File

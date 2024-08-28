@@ -1,0 +1,6 @@
+---
+dependencies:
+  - role: utils_deployment_vars
+    vars:
+      add_vars:
+        - minio

@@ -1,0 +1,18 @@
+---
+- name: Enable metrics collection for kube-scheduler and controller
+  hosts: master
+  become: yes
+  gather_facts: no
+  vars:
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+  tasks:
+    - name: Enable listen on all interfaces to allow metrics collection
+      lineinfile:
+        state: present
+        path: "{{ item }}"
+        backrefs: yes
+        regex: '^(\s*- --bind-address)=[\d\.]+$'
+        line: '\1=0.0.0.0'
+      loop:
+        - /etc/kubernetes/manifests/kube-scheduler.yaml
+        - /etc/kubernetes/manifests/kube-controller-manager.yaml

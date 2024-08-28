@@ -1,0 +1,63 @@
+---
+## Playbook to create inventory and import variables
+- name: Delete CCD Stack from Openstack Project {{ deployment_id }}
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+
+  tasks:
+    - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+      command: >
+        lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+      register: sftp_result
+      ignore_errors: yes
+    - name: Parse JSON content
+      set_fact:
+        deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+    - name: Display the variable
+      debug:
+        var: deployment_data
+
+    - name: Minio
+      block:
+      - name: Download openstack credentials from MinIO
+        aws_s3:
+          aws_access_key: "{{ minio_xdn_access_key }}"
+          aws_secret_key: "{{ minio_xdn_secret_key }}"
+          s3_url: "{{ minio_xdn_url }}"
+          bucket: sts-cni
+          object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+          mode: getstr
+          ignore_nonexistent_bucket: True
+        register: openstack_access
+
+      - name: Import variables from openstack creds file
+        #no_log: yes
+        set_fact:
+          openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+      
+      - name: Set openstack username and password vars from openstack creds var
+        #no_log: yes
+        set_fact:
+          openstack_user: "{{ openstack_access_vars.parameters.ansible_variables.openstack_username }}"
+          openstack_password: "{{ openstack_access_vars.parameters.ansible_variables.openstack_user_password }}"
+          openstack_projectname: "{{ openstack_access_vars.parameters.ansible_variables.openstack_project_name }}"
+          openstack_project_domain_name: "{{ openstack_access_vars.parameters.ansible_variables.openstack_domain_name }}"
+
+    - name: Delete ccd stack {{ deployment_id }} on OpenStack
+      os_stack:
+        name: "{{ deployment_id }}"
+        state: absent
+        verify: no
+        auth:
+          username: "{{  openstack_user  }}"
+          project_name: "{{  deployment_id  }}"
+          password: "{{  openstack_password  }}"
+          auth_url: "{{  deployment_data.dit_pod.authUrl  }}"
+          user_domain_name: "default"
+          project_domain_name: "{{ openstack_project_domain_name }}"
+
+

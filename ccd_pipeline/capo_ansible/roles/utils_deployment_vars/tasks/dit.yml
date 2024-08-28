@@ -1,0 +1,26 @@
+---
+- name: Assign Deployment DIT link from DTT Deployment Data if present
+  set_fact:
+    dit_project_link: "{{ links_qry_result | first | regex_replace('projects/view', 'api/projects') }}"
+  when: links_qry_result | length > 0
+  vars:
+    products_qry: "[? product_type_name == 'CCD'].links"
+    links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+    links_qry_result: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) }}"
+
+- name: Fetch Deployment DIT project
+  uri:
+    method: GET
+    url: "{{ dit_project_link }}"
+    return_content: yes
+    status_code: 200
+  register: dit_project_result
+  until: dit_project_result.json
+  retries: 1
+  delay: 3
+  when: dit_project_link is defined
+
+- name: Assign Deployment DIT project
+  set_fact:
+    dit_project: "{{ dit_project_result.json | from_yaml }}"
+    dit_vars_assigned: True

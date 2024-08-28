@@ -1,0 +1,31 @@
+---
+# Get DTT access details from Minio and log in.
+# Cookie is saved to dtt_cookie
+
+- name: Get DTT credentials from MinIO
+  include_role:
+    name: creds
+  vars:
+    name: dtt_credentials
+    file: dtt_credentials.yml
+
+- name: Log in to DTT
+  uri:
+    use_proxy: no
+    method: POST
+    force_basic_auth: true
+    url: "{{ dtt_credentials.dtt_url }}/api/auth/signin"
+    body:
+      username: '{{ dtt_credentials.dtt_user }}'
+      password: '{{ dtt_credentials.dtt_password }}'
+    body_format: json
+    return_content: yes
+    status_code: "200"
+  no_log: true
+  register: dtt_login
+
+- name: Set DTT URL and cookie
+  set_fact:
+    # Overwrite dtt_url if we log in
+    dtt_url: "{{ dtt_credentials.dtt_url }}"
+    dtt_cookie: "{{ dtt_login.set_cookie }}"

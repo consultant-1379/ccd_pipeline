@@ -1,0 +1,63 @@
+pipeline {
+  agent {
+    node {
+      label 'capo_pipeline_jenkins_agent'
+    }
+  }
+  environment {
+    VAULT_FILE = credentials('ccd_pipeline_secret')
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 40, unit: 'MINUTES')
+    timestamps()
+  }
+  stages {
+    stage('Set build name') {
+      steps {
+          script {
+               currentBuild.displayName = "${env.BUILD_NUMBER} ${params.deployment_id}"
+               job_user = getJobUser()
+          }
+      }
+    }
+    stage('Run Generate Config for a capo deployment') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'xdn_sftp', passwordVariable: 'SFTP_PASSWORD', usernameVariable: 'SFTP_USER')]) {
+          sh "cd ccd_pipeline/capo_ansible; ansible-playbook -vvv  -e build_number=${env.BUILD_NUMBER} -e job_link=${env.BUILD_URL} -e job_user=${job_user} -e deployment_id=${deployment_id} -e sftp_user=${SFTP_USER} -e sftp_password=${SFTP_PASSWORD} --vault-password-file $VAULT_FILE  generate-and-upload-conf-in-xdn.yml"
+        }
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+      // echo 'Pipeline Exiting OQS Queue'
+      // sh "cd capo_ansible; ansible-playbook -vvv -e deployment_id=${deployment_id} --vault-password-file $VAULT_FILE leave-oqs-queue.yml"
+    }
+  }
+}
+
+def getJobUser(){
+  def build = currentBuild.rawBuild
+  def userIdCause = null
+
+    // Check all causes of the build
+  for (cause in build.getCauses()) {
+    if (cause instanceof hudson.model.Cause$UserIdCause) {
+      userIdCause = cause
+      break
+    }
+  }
+
+  if (userIdCause != null) {
+      return userIdCause.userId
+  } else {
+      return "UnknownUser"
+  }
+}

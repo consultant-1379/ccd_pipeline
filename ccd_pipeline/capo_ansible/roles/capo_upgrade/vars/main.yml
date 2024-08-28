@@ -1,0 +1,2 @@
+config_dir: --configdir {{ deployed_image_path }}/{{ deployment_id }}/
+config_file: --config {{ deployed_image_path }}/{{ deployment_id }}/{{ deployment_id }}/config.yml

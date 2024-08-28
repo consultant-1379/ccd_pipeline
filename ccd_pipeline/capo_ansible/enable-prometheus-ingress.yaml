@@ -1,0 +1,14 @@
+- name: monitoring
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+
+  roles:
+    - deployment_id
+    - dtt
+    - get_variables
+#    - debug
+    - get_kube_config
+    - ingress
+    - produce_target_file
+

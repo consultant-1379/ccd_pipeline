@@ -1,0 +1,3 @@
+---
+# Defaults can be overriden when including this role in a play
+state: active

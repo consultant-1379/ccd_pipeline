@@ -1,0 +1,65 @@
+---
+#~# Playbook to deploy vCenter Kubernetes Infrastructure VMs
+
+- name: Deploy vCenter Kubernetes Infrastructure VMs ( To Deploy VMs [--tags deploy] | To Delete VMs [--tags delete] )
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars_files: vars/group_vars/minio.yml
+  vars:
+    #~# Bucket/Folder to check for config files on MinIO in de-cni/
+    minio_bucket: ccd # Live Deployment Bucket
+    # minio_bucket: temp # Bucket for testing purposes
+    output_dict: {}
+    #~# tmp var
+    cluster: POD-B-CCD-Cluster1
+  #~# Tasks to run before Deploy VM Role execution
+  pre_tasks:
+    - name: Verify deployment_id && vm_template is defined
+      fail: msg="{{ item.hostname }}"="'deployment_id' or 'vm_template' is not defined...usage[ -e deployment_id=XXX  -e vm_template=XXX ]"
+      when: deployment_id is not defined or vm_template is not defined
+      tags: [never,deploy,delete]
+
+    - name: Retrieve {{ deployment_id }}.vmconfig.yml from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: /{{ minio_bucket }}/{{ deployment_id }}/{{ deployment_id }}.vmconfig.yml
+        dest: /tmp/{{ deployment_id }}.vmconfig.yml
+        mode: get
+      tags: [never,deploy,delete]
+
+    - name: Include retrieved {{ deployment_id }}.vmconfig.yml
+      include_vars: /tmp/{{ deployment_id }}.vmconfig.yml
+      tags: [never,deploy,delete]
+
+  #~# Tasks to run after Deploy VM Role execution
+  post_tasks:
+    - name: Generate VM network config output
+      no_log: true
+      set_fact:
+        output_dict: "{{ output_dict | combine( { item.hostname: item.network_config } ) }}"
+      loop: "{{ vms_to_deploy }}"
+      tags: [never,deploy]
+
+    - name: Output {{ deployment_id }} VMs Network Configuration
+      debug:
+        msg: "{{ output_dict }}"
+      tags: [never,deploy]
+
+    - name: Cleanup & Delete local temp files
+      file:
+        path: /tmp/{{ item }}
+        state: absent
+      loop:
+        - "{{ deployment_id }}.vmconfig.yml"
+      tags: [never,deploy,delete]
+  #~# Roles
+  roles:
+    #~# Deploy VM to vCenter from a predefined template
+    - deploy-vmware-vm-from-template
+
+#~# End Playbook
+...

@@ -1,0 +1,94 @@
+---
+# Playbook to Deploy a CAPO Cluster for a passed in deployment_id.
+# CCD Flavor is retrieved from Deployment DTT Entry.
+# Based off the CCD Flavor, the corresponding Flavor template is pulled from Minio.
+# CCD Version is then pulled from the flavor template & used to deploy Cluster.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Optional Vars:
+# - search_image_dir
+#     > String - Path to Images Location
+#     > Default - /ccd/IMAGES
+#     > Example Override - /ccd/IMAGES/STAGING
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook deploy-capo-cluster.yml -e deployment_id=<deployment_id> --ask-vault-pass [ -e search_image_dir=/path/to/dir ]
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook deploy-capo-cluster.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file [ -e search_image_dir=/path/to/dir ]
+#
+- name: Create CAPO Cluster on OpenStack
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    use_upgrade_build_server: true
+  roles:
+    - deployment_id
+
+  tasks:
+    - name: "Get Deployment '{{ deployment_id }}' from DTT"
+      include_role:
+        name: dtt
+        
+  ## Register ccd version into variable.
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+  ##  End ## Register ccd version into variable.
+
+    - name: Deploy CAPO cluster
+      block:
+        - name: Add CAPO Image path role
+          include_role:
+            name: capo_getimage_path
+
+        - name: Download ccd stack environment file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.capo.env.yml
+            dest: /tmp/{{ deployment_id }}.env.yml
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Set ccdadm executable path variable
+          set_fact:
+            ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+        - name: Check and Delete CAPO Deployment {{ deployment_id }} directory from {{ ccd_version }}
+          file:
+            path: "{{ capo_config_path }}/{{ deployment_id }}"
+            state: absent
+
+        - name: Ensure directory '{{ deployment_id }}' exists in '{{ capo_config_path }}'
+          file:
+            path: '{{ capo_config_path }}/{{ deployment_id }}'
+            state: directory
+
+        - name: execute CAPO config validation for {{ deployment_id }}
+          command: "{{ ccdadm_bin }} cluster config validate -n {{ deployment_id }} -c /tmp/{{ deployment_id }}.env.yml --debug"
+
+        - name: Add CAPO define cluster role
+          include_role:
+            name: capo_definecluster
+
+        - name: Add CAPO set context role
+          include_role:
+            name: capo_setcontext
+
+        - name: Add CAPO deploy role
+          include_role:
+            name: capo_deploy
+

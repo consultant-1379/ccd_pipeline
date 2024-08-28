@@ -1,0 +1,149 @@
+---
+- name: Join the OQS Queue
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    oqs_timeout: 270
+    dtt_status: In Use
+    login: true
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+
+    - name: Get DTT {{ deployment_id }} flavor
+      set_fact:
+        dtt_flavor: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+    - name: Get Minio {{ deployment_id }} flavor template
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: templates
+        object: /managed-config/{{ dtt_flavor }}/{{ dtt_flavor }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: minio_flavor_template
+
+    - name: Import Minio {{ deployment_id }} vars
+      set_fact:
+        minio_flavor_template_vars: "{{ minio_flavor_template.contents|from_yaml }}"
+
+    - name: Set ccd version for {{ deployment_id }}
+      set_fact:
+        ccd_version: "{{ minio_flavor_template_vars.parameters.ccd_version }}"
+
+    - name: Set DTT deployment id
+      set_fact:
+        dtt_deployment_id: "{{ dtt_deployment_resp.json[0]._id }}"
+
+    - name: Get DIT link from DTT
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Set DIT link
+      set_fact:
+        dit_project_link: "{{  dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get DIT project
+      uri:
+        method: GET
+        url: "{{ dit_project_link }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Set DIT project
+      set_fact:
+        dit_project: "{{ get_dit_project.json }}"
+
+    - name: Get DIT pod data
+      uri:
+        method: GET
+        url: "{{ dit_url }}/api/pods/{{ dit_project.pod_id }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Set DIT pod
+      set_fact:
+        dit_pod: "{{ get_dit_pod.json }}"
+
+    - name: Set DIT pod name for use as OQS pod name
+      set_fact:
+        dit_pod_name: "{{ dit_pod.name | regex_replace('^Cloud') }}"
+
+    - name: Set DIT project for use as OQS deployment name
+      set_fact:
+        dit_project_name: "{{ dit_project.name }}"
+
+    - name: Check OQS for deployment {{ dit_project_name }}
+      uri:
+        method: GET
+        url: "{{ oqs_url }}/api/deployments/search?name={{ dit_project_name }}"
+        return_content: yes
+        status_code: 200
+      register: oqs_deployment
+      retries: 1
+      delay: 3
+
+    - name: Set OQS JSON payload for {{ deployment_id }}
+      set_fact:
+        oqs_json_payload: >
+               { 'name': "{{ dit_project_name }}", 'associatedPod': "Cloud{{ dit_pod_name }}", 'queueStatus': "Queued",
+                 'jobType': "Install", 'product': "CCD", 'productSet': "{{ ccd_version }}", 'customTimeout': "{{ oqs_timeout }}" }
+
+    - name: Join the OQS queue for deployment {{ dit_project_name  }}
+      uri:
+        method: POST
+        url: "{{ oqs_url }}/api/deployments"
+        body: "{{ oqs_json_payload }}"
+        body_format: json
+        return_content: yes
+        status_code: 201
+      retries: 1
+      delay: 3
+      register: create_msg
+      when: oqs_deployment.json[0].name is not defined
+      failed_when: "'errors' in create_msg.content or create_msg.status != 201"
+
+    - name: Update the OQS queue for deployment {{ dit_project_name  }}
+      uri:
+        method: PUT
+        url: "{{ oqs_url }}/api/deployments/{{ oqs_deployment.json[0]._id }}"
+        body: "{{ oqs_json_payload }}"
+        body_format: json
+        return_content: yes
+        status_code: 200
+      retries: 1
+      delay: 3
+      register: update_msg
+      when: oqs_deployment.json[0].name is defined
+      failed_when: "'errors' in update_msg.content or update_msg.status != 200"
+
+    - name: Check OQS is set to Active for deployment {{ dit_project_name  }}
+      uri:
+        method: GET
+        url: "{{ oqs_url }}/api/deployments/search?name={{ dit_project_name }}"
+        return_content: yes
+        status_code: 200
+      register: oqs_deployment
+      until: oqs_deployment.json[0].queueStatus == "Active"
+      # 12 hour timeout in seconds
+      retries: 2880
+      delay: 15

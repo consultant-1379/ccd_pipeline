@@ -1,0 +1,70 @@
+---
+# Get director VIP and SSH key from Minio
+# VIP is added to CCD group
+
+- name: Get director IP and key
+  block:
+    - name: Get {{ deployment_id | mandatory }} director VIP from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: /ccd/{{ deployment_id }}/{{ deployment_id }}.directorvip.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: director_str
+      when: director_ip is not defined
+
+    - name: Download master director private key from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: tools
+        object: director.pem
+        dest: "/tmp/{{ deployment_id }}.pem"
+        mode: get
+        ignore_nonexistent_bucket: True
+      notify: Remove local director SSH key
+
+    - name: Set private key permissions to "0600" mode
+      file:
+        path: "/tmp/{{ deployment_id }}.pem"
+        mode: 0600
+  delegate_to: localhost
+
+- name: Set director IP
+  set_fact:
+    director_ip: "{{ (director_str.contents | from_yaml).directorvip }}"
+  when: director_ip is not defined
+
+- name: Add director as host and include in CCD group
+  add_host:
+    name: "{{ director_ip }}"
+    groups: "CCD"
+    ansible_ssh_user: eccd
+    ansible_ssh_private_key_file: "/tmp/{{ deployment_id }}.pem"
+    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+
+- name: Test director connection and get director hostname
+  command: /usr/bin/hostname
+  register: hostname
+  delegate_to: "{{ director_ip }}"
+  changed_when: false
+
+- name: Filter the deployment id from hostname
+  set_fact:
+    filter_result: "{{ hostname.stdout | regex_search (deployment_id) }}"
+
+- name: Correct director node is connected
+  debug:
+    msg: You are connected to {{ hostname.stdout }}. Correct director node is connected
+  when: filter_result == deployment_id
+
+- name: Stop the playbook running if wrong director node is connected
+  fail:
+    msg: You are connected to {{ hostname.stdout }}. Director hostname doesn't match deployment_id. Please check if files in MinIO are up to date.
+  when: filter_result != deployment_id
+
+

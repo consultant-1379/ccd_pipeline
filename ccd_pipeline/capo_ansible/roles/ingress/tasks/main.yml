@@ -1,0 +1,38 @@
+---
+# tasks file for ingress
+- name: parsing {{ dit_project_location }} for FQDN (if GIC Rosersberg )
+  set_fact: 
+    dit_project_location: sero
+  when: dit_project_location == 'gic rosersberg'
+
+- name: "Check monitoring type"
+  k8s_info:
+    kind: Service
+    name: eric-victoria-metrics-cluster-vmselect
+    kubeconfig: "{{ kubeconfig_path }}"
+    namespace: monitoring
+  register: service_list
+
+- name: "Check if Victoria metrics is running on cluster"
+  set_fact:
+    wiktoria: "{{ item.spec.selector | to_json | regex_search('.*victoria.*', ignorecase=True) }}"
+  loop: "{{ service_list.resources }}"
+
+
+- name : Create Victoria ingress.yaml from template file for prom.{{ dtt_deployment.name }}.stsoss.{{ dit_project_location }}.gic.ericsson.se
+  template:
+    src: ingress-victoria.j2
+    dest: /tmp/ingress.yaml
+  when: wiktoria is defined
+
+- name : Create Prometheus ingress.yaml from template file for prom.{{ dtt_deployment.name }}.stsoss.{{ dit_project_location }}.gic.ericsson.se
+  template:
+    src: ingress-promek.j2
+    dest: /tmp/ingress.yaml
+  when: wiktoria is not defined
+
+- name: deploy ingress from created file
+  k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: /tmp/ingress.yaml

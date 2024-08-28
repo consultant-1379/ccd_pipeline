@@ -1,0 +1,23 @@
+#Role to set CAPO context for deploymet_id
+---
+- name: Set ccdadm executable path variable
+  set_fact:
+    ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+- name: Set context for {{ deployment_id }}
+  command: "{{ ccdadm_bin }} context set -n {{ deployment_id }} --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"
+
+- name: Get context for CAPO {{ deployment_id }}
+  command: "{{ ccdadm_bin }} context get --configdir {{ capo_config_path  }}/{{ deployment_id }}/ --debug"
+  register: context
+
+- name: Set get_context variable
+  set_fact:
+    get_context: "{{ context.stdout | regex_search('current context: ccd-.*') | regex_search('ccd-.*') | string }}"
+
+- name: Verify correct context for CAPO {{ deployment_id }}
+  fail:
+    msg: "Fatal Error: {{ deployment_id }} context is incorrect. Please check."
+  when: 
+    - get_context != deployment_id
+    - "'{{ deployment_id }}' not in '{{ context.stdout }}'"

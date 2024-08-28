@@ -1,0 +1,37 @@
+##   ansible-playbook delete-ccd-info-from-minio.yml -e deployment_id={ccd deployment id}
+---
+- name: Delete CCD infomation from MinIO
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files: vars/group_vars/minio.yml
+
+  tasks:
+    - name: List objects in folder {{ deployment_id }}
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        prefix: ccd/{{ deployment_id | mandatory }}
+        mode: list
+      register: key_list
+
+    - name: Delete objects in folder {{ deployment_id }}
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: "{{ item }}"
+        mode: delobj
+      loop: "{{ key_list.s3_keys }}"
+
+    - name: Delete folder {{ deployment_id }} from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: de-cni
+        object: /ccd/{{ deployment_id }}
+        mode: delobj

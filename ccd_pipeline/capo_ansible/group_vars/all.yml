@@ -1,0 +1,45 @@
+---
+# Variables that all playbooks have access to.
+
+# Minio ECN
+minio_access_key: minio
+minio_secret_key: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          35646632336638303933333066313464633762306138383264626436303736613133616637333364
+          3530613665363664626166396663303464643937353432380a616666313061353637306334633532
+          36373033656138616264393839396362626162356664653533333636346564646132373239373064
+          6263343437376330340a643832346131353436363034333839613235336138376237393333376161
+          3830
+
+minio_url: http://minio.stsoss.seli.gic.ericsson.se:9000/
+# Minio XDN
+minio_xdn_access_key: minio
+minio_xdn_secret_key: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          35303431306566306163383732396432393636656638373634626637366638333665353930366333
+          3134636665643063643261373162323363323566373061630a316161366365633338303039313065
+          63663734613834356366313835303138623861393337393535373539343138646332336232623037
+          6238383533343430320a393166623165643262303334306664363435386136646361613436346237
+          3938
+
+minio_xdn_url: http://10.145.159.150:9000/
+
+# DTT
+dtt_url: http://atvdtt.athtem.eei.ericsson.se
+
+# DIT
+dit_url: http://atvdit.athtem.eei.ericsson.se
+
+# OQS
+oqs_url: https://atvoqs.athtem.eei.ericsson.se
+
+
+okta_url: https://okta.athtem.eei.ericsson.se
+
+# Capo Builld Server vars
+capo_build_ansible_tmp: /ccd/ansible_tmp
+
+# Capo Images Location
+capo_images_url: https://arm.sero.gic.ericsson.se/artifactory/proj-erikube-generic-local/erikube/capo/swPackage
+capo_image_path: /proj/ossststools/ECCD/IMAGES
+capo_config_path: /tmp/config

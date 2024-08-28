@@ -1,0 +1,61 @@
+---
+# Playbook to Compare & Validate a deployment_id Upgrade Version vs CCD Version.
+# Both Upgrade & CCD Versions fetched from a deployment_id DTT Entry.
+#
+# Playbook Ensures that the Upgrade CCD Version is Greater than the CCD Version Specified, Failing if not.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# NB: Vars files used in this playbook require ansible-vault decrypting
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook upgrade-version-dtt-check.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook upgrade-version-dtt-check.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Verify CCD Upgrade Version in DTT
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+  tasks:
+    - name: Verify CCD Version & Upgrade Version defined
+      assert:
+        that:
+          - dtt_ccd_version is defined
+          - dtt_upgrade_ccd_version is defined
+        fail_msg:
+          - Either CCD Version or Upgrade Version not present on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Please verify product configuration contains 'version' & 'upgrade_version'
+
+    - name: Verify Upgrade Verion is Valid Version
+      assert:
+        that:
+          - dtt_upgrade_ccd_version is regex('^[0-9]{1,2}\.\d+\.[0-9]-[0-9]{6}-[0-9a-zA-Z]{8}$')
+        fail_msg:
+          - Upgrade Version ( {{ dtt_upgrade_ccd_version }} ) Invalid.
+          - Valid format - Example ( 2.27.0-001294-db2e8e6b ).
+          - Please Verify Upgrade Version Format on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Exiting PLaybook!
+
+    - name: Verify Upgrade Version Greater than CCD Version
+      assert:
+        that:
+          - upgrade_version is version(ccd_version,'>') or upgrade_version is version(ccd_version,'==') and upgrade_build > ccd_build
+        fail_msg:
+          - Upgrade Version ( {{ dtt_upgrade_ccd_version }} ) not Greater than CCD Version ( {{ dtt_ccd_version }} )
+          - Please Verify Upgrade Version on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Exiting PLaybook!
+      vars:
+        ccd_version: "{{ dtt_ccd_version.split('-') | first }}"
+        ccd_build: "{{ dtt_ccd_version.split('-') | last }}"
+        upgrade_version: "{{ dtt_upgrade_ccd_version.split('-') | first }}"
+        upgrade_build: "{{ dtt_upgrade_ccd_version.split('-')[1] }}"

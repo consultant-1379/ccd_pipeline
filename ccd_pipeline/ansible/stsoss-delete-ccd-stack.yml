@@ -1,0 +1,33 @@
+---
+## Playbook to create inventory and import variables
+- name: Delete CCD Stack from Openstack Project {{ deployment_id }}
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  tasks:
+    # Import role, this role returns below variables that we can use in play
+    # proj_username  it privides project username
+    # proj_password  it provides project password
+    # proj_name      it provides project name
+    # proj_uuid      it provides project uuid
+    # cloud_auth_url it provides required clouds' authentication url
+    # user_domain    it has value 'default'
+    # proj_domain    it has value 'default'
+    - name: Import role 'project-info-dtt' to get project details from DTT
+      import_role:
+        name: project-info-dtt
+
+    - name: Delete ccd stack {{ deployment_id }} on OpenStack
+      openstack.cloud.stack:
+        name: "{{ deployment_id }}"
+        state: absent
+        auth:
+          username: "{{ proj_username  }}"
+          project_name: "{{ proj_name  }}"
+          password: "{{ proj_password  }}"
+          auth_url: "{{ cloud_auth_url }}"
+          user_domain_name: "{{ user_domain   }}"
+          project_domain_name: "{{ proj_domain  }}"
+
+

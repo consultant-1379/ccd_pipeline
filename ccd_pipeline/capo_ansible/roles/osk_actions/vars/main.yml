@@ -1,0 +1,2 @@
+cloud_name: "{{ deployment_env.infra.iaas.capo.clouds.keys() | list | first }}"
+cloud_auth: "{{ deployment_env.infra.iaas.capo.clouds[cloud_name].auth }}"

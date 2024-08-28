@@ -1,0 +1,195 @@
+---
+#~# Playbook to Automate the conversion and upload of the CCD IBD into vcenter
+
+- name: Upload Node Image into Vcenter
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    deploy_vsphere_env: podb-vcenter_env.yml
+    path_to_file: /vmware/images/
+    vmx_template_file: vmx_template.j2
+    cluster: POD-B-CCD-Cluster1
+  #~# Tasks to run before Govc Role execution
+  pre_tasks:
+    - name: Verify qcow_dir & cluster variables present
+      fail: msg="'qcow_dir' or 'cluster' is not defined...usage[ -e qcow_dir=/absolute/path/to/directory/ -e cluster=XXX ]"
+      when: qcow_dir is not defined or cluster is not defined
+
+    - name: Pull down {{ deploy_vsphere_env }} from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "cloud"
+        object: "{{ item }}"
+        dest: /tmp/{{ item }}
+        mode: get
+      loop:
+        - "{{ deploy_vsphere_env }}"
+
+    - name: Include retrieved {{ deploy_vsphere_env }}
+      include_vars: /tmp/{{ deploy_vsphere_env }}
+
+    - name: Pull down {{ vmx_template_file }} from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "templates"
+        object: "/vcenter/{{ vmx_template_file }}"
+        dest: /tmp/{{ vmx_template_file }}
+        mode: get
+
+    - name: Check if directory {{ qcow_dir }} exists
+      stat:
+        path: "{{ qcow_dir }}"
+      register: dir_check
+
+    - name: Fail if directory {{ qcow_dir }} does not exist
+      fail:
+        msg: "directory {{ qcow_dir }} does not exist on machine"
+      when: not dir_check.stat.exists
+
+    - name: Search {{ qcow_dir }} directory for qcow2 image
+      find:
+        paths: '{{ qcow_dir }}'
+        patterns: '*-node-*.qcow2'
+      when: dir_check.stat.isdir is defined and dir_check.stat.isdir
+      register: find_result
+
+    - name: Fail if no qcow file found in {{ qcow_dir }}
+      fail:
+        msg: "No file matching '*-node-*.qcow2' located in {{ qcow_dir }}"
+      when: find_result.matched<1
+
+    - name: Set the Required variables for playbook to continue
+      set_fact:
+        qcow_image: "{{ find_result.files[0].path.split(qcow_dir)[1].lstrip('/') }}"
+        vmdk_image: "{{ find_result.files[0].path.split(qcow_dir)[1].lstrip('/') | replace('qcow2','vmdk') }}"
+        vmx_file: "{{ find_result.files[0].path.split(qcow_dir)[1].lstrip('/') | replace('-image.qcow2','.vmx') }}"
+        ova_file: "{{ find_result.files[0].path.split(qcow_dir)[1].lstrip('/') | replace('-image.qcow2','.ova') }}"
+        node_name: "{{ find_result.files[0].path.split(qcow_dir)[1].lstrip('/') | replace('-image.qcow2','') }}"
+        vcenter_cluster: "{{ cluster }}"
+        vcenter_datastore: "{{ deploy_vsphere_clusters[cluster].vms }}"
+      when: "(find_result.matched>0 and find_result.files|length==1) and (cluster in deploy_vsphere_clusters)"
+
+    - name: Fail if any Generated Required Vars Missing
+      fail:
+        msg: Could not locate all required vars for Config Generation. Please Verify qcow_dir[{{ qcow_dir }}], cluster[{{ cluster }}]
+      when: >
+        (qcow_image is not defined or qcow_image|length<1) or
+        (vmdk_image is not defined or vmdk_image|length<1) or
+        (vmx_file is not defined or vmx_file|length<1) or
+        (ova_file is not defined or ova_file|length<1) or
+        (node_name is not defined or node_name|length<1) or
+        (vcenter_cluster is not defined or vcenter_cluster|length<1) or
+        (vcenter_datastore is not defined or vcenter_datastore|length<1)
+
+  #~# Tasks to run after Govc Role execution
+  post_tasks:
+    - name: Checks if directory {{ path_to_file }}{{ node_name }} exists. Creates if not
+      file:
+        path: "{{ path_to_file }}{{ node_name }}"
+        state: directory
+
+    - name: Check if vmdk file already exists in {{ path_to_file }}{{ node_name }}
+      stat:
+        path: "{{ path_to_file }}{{ node_name }}/{{ vmdk_image }}"
+      register: vmdk_check
+
+    - name: Convert {{ qcow_image }} to vmdk (WILL TAKE A FEW MINUTES, PLEASE BE PATIENT!)
+      command: >-
+        qemu-img convert -f qcow2 -O vmdk -o subformat=streamOptimized
+        {{ find_result.files[0].path }} {{ path_to_file }}{{ node_name }}/{{ vmdk_image }}
+      register: vmdk_output
+      when: not vmdk_check.stat.exists
+
+    - name: Check if vmx file already exists in {{ path_to_file }}{{ node_name }}
+      stat:
+        path: "{{ path_to_file }}{{ node_name }}/{{ vmx_file }}"
+      register: vmx_check
+
+    - name: Generate {{ qcow_dir }} vmx file
+      template:
+        src: /tmp/{{ vmx_template_file }}
+        dest: "{{ path_to_file }}{{ node_name }}/{{ vmx_file }}"
+        mode: '0666'
+      when: not vmx_check.stat.exists
+
+    - name: Check if ova file already exists in {{ path_to_file }}{{ node_name }}
+      stat:
+        path: "{{ path_to_file }}{{ node_name }}/{{ ova_file }}"
+      register: ova_check
+
+    - name: Generate {{ qcow_dir }} ova from vmx file (WILL TAKE A FEW MINUTES, PLEASE BE PATIENT!)
+      command: "ovftool {{ path_to_file }}{{ node_name }}/{{ vmx_file }} {{ path_to_file }}{{ node_name }}/{{ ova_file }}"
+      register: ovf_output
+      when: not ova_check.stat.exists
+
+    # # # - name: Deploy template {{ ova_file }} to VCenter (WILL TAKE A FEW MINUTES, PLEASE BE PATIENT!)
+    # # #   shell: ovftool --acceptAllEulas --skipManifestCheck --noSSLVerify --allowExtraConfig --diskMode=thin --datastore={{ vcenter_datastore }} -vf={{deploy_vsphere_folder}}/Templates -nw=compute-vts5 --name={{ node_name }} {{ path_to_file }}{{ ova_file }} 'vi://{{ deploy_vsphere_user }}:{{ deploy_vsphere_password }}@{{ deploy_vsphere_host }}/{{ deploy_vsphere_datacenter }}/host/{{ vcenter_cluster }}/'
+
+    - name: Check if VM {{ node_name }} exists on VCenter
+      command: "{{ govc_file }} find vm -name {{ node_name }}"
+      environment:
+        GOVC_URL: "https://{{ deploy_vsphere_ip }}/sdk"
+        GOVC_USERNAME: "{{ deploy_vsphere_user }}"
+        GOVC_PASSWORD: "{{ deploy_vsphere_password }}"
+        GOVC_INSECURE: true
+      register: vm_exist
+      changed_when: (vm_exist.stdout is defined and vm_exist.stdout|length>0)
+
+    - name: VM {{ node_name }} Already exists
+      debug:
+        msg: "VM {{ node_name }} is already present on VCenter: {{ deploy_vsphere_datacenter }}/{{ vm_exist.stdout }}, Skipping upload"
+      when: (vm_exist.stdout is defined and vm_exist.stdout|length>0) and (node_name in vm_exist.stdout)
+
+    - name: Deploy template {{ ova_file }} to VCenter (WILL TAKE A FEW MINUTES, PLEASE BE PATIENT!)
+      vmware_deploy_ovf:
+        hostname: "{{ deploy_vsphere_host }}"
+        username: "{{ deploy_vsphere_user }}"
+        password: "{{ deploy_vsphere_password }}"
+        datacenter: "{{ deploy_vsphere_datacenter }}"
+        cluster: "{{ vcenter_cluster }}"
+        datastore: "{{ vcenter_datastore }}"
+        folder: "{{ deploy_vsphere_datacenter }}/vm/{{ deploy_vsphere_folder }}/Templates"
+        name: "{{ node_name }}"
+        networks:
+          "VM Network": compute-vts5
+        allow_duplicates: no
+        validate_certs: no
+        power_on: yes
+        ovf: "{{ path_to_file }}{{ node_name }}/{{ ova_file }}"
+      register: template_deploy_output
+      delegate_to: localhost
+      when: (vm_exist.stdout is not defined or vm_exist.stdout|length<1) and (node_name not in vm_exist.stdout)
+
+    - name: Set the disk.EnableUUID parameter
+      command: "{{ govc_file }} vm.change -vm /{{ deploy_vsphere_datacenter }}/vm/{{ deploy_vsphere_folder }}/Templates/{{ node_name }} -e disk.enableUUID=True"
+      environment:
+        GOVC_URL: "https://{{ deploy_vsphere_ip }}/sdk"
+        GOVC_USERNAME: "{{ deploy_vsphere_user }}"
+        GOVC_PASSWORD: "{{ deploy_vsphere_password }}"
+        GOVC_INSECURE: true
+      register: govc_vm_info
+      when: (vm_exist.stdout is not defined or vm_exist.stdout|length<1) and (node_name not in vm_exist.stdout)
+
+    - name: Cleanup & Delete local temp files
+      file:
+        path: "{{ item }}"
+        state: absent
+      become: yes
+      become_method: sudo
+      loop:
+        - "/tmp/{{ deploy_vsphere_env }}"
+        - "/tmp/{{ vmx_template_file }}"
+        - "{{ govc_file }}"
+
+  #~# Roles
+  roles:
+    #~# Install the Playbook dependancy govc on the local machine
+    - install-govc-dependency
+
+#~# End Playbook
+...

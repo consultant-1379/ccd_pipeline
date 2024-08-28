@@ -1,0 +1,28 @@
+---
+#~# Playbook for checking status in DTT at the start of the CCD Delete pipeline
+
+- name: Check that status of entry in DTT is "Blocked/In Maintenance"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    dtt_status: Blocked/In Maintenance
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+    - name: Extract '{{ dtt_name }}' current DTT status from returned data
+      set_fact:
+        current_status: '{{ dtt_deployment.status }}'
+
+    - name: >
+        Fail Check - current DTT status '{{ current_status }}'
+        must match required status '{{ dtt_status }}'
+      fail: >
+        msg="Status mismatch!! Current DTT deployment '{{ deployment_id }}'
+        Status '{{ current_status }}' does not match required status '{{ dtt_status }}'"
+      when: current_status != dtt_status
+
+#~# End Playbook
+...

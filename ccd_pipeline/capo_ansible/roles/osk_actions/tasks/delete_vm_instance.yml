@@ -1,0 +1,11 @@
+---
+- name: Delete VM Instance from OpenStack
+  os_server:
+    auth: "{{ cloud_auth }}"
+    state: absent
+    name: "{{ instance_name }}"
+  register: vm_instance_results
+
+- name: Set the VM Instance Result
+  set_fact:
+    osk_delete_vm_instance_results: "{{ vm_instance_results }}"

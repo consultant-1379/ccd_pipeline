@@ -1,0 +1,6 @@
+---
+- name: Remove local director SSH key
+  file:
+    path: "/tmp/{{ deployment_id }}.pem"
+    state: absent
+  delegate_to: localhost

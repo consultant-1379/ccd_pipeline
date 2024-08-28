@@ -1,0 +1,7 @@
+---
+# Defaults can be overriden when including this role in a play
+
+pem_location: /tmp/{{ deployment_id }}_cp.pem
+# Only add cp_nodes by default
+add_group:
+  - vip_node

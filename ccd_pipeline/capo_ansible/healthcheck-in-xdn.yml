@@ -1,0 +1,134 @@
+---
+# Playbook to Perform Cluster Healthcheck for a passed in Deployment ID
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Optional Vars:
+# - search_image_dir
+#     > String - Path to Images Location
+#     > Default - /ccd/IMAGES
+#     > Example Override - /ccd/IMAGES/STAGING
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook healthcheck.yml -e deployment_id=<deployment_id> --ask-vault-pass [ -e search_image_dir=/path/to/dir ]
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook healthcheck.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file [ -e search_image_dir=/path/to/dir ]
+#
+- name: Run health check on CAPO cluster
+  hosts: localhost
+  gather_facts: no
+  vars:
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - deployment_id
+
+  tasks:
+    - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+      command: >
+        lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+      register: sftp_result
+      ignore_errors: yes
+    
+    - name: Parse JSON content
+      set_fact:
+        deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+    - name: Display the variable
+      debug:
+        var: deployment_data
+
+    ## Register ccd version into variable.
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+    - name: Check CCD CAPO existency in DTT (ansible facts)
+      fail:
+        msg: Failure. Not a CAPO Deployment, Exiting Playbook.
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        capo_qry: "[? key_name == 'ccd'].key_value"
+        ccd_capo_query: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(capo_qry) }}"
+      when: ccd_capo_query | length == 0
+
+    - name: Block for getting config dir content
+      block:
+        - name: Ensure directory '{{ deployment_id }}' exists in '{{ capo_config_path }}'
+          file:
+            path: '{{ capo_config_path }}/{{ item }}'
+            state: directory
+          loop:
+            - "{{ deployment_id }}"
+            - "{{ deployment_id }}/{{ deployment_id }}"
+
+        - name: Download Deployment Environment file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.capo.env.yml
+            dest: /tmp/{{ deployment_id }}.env.yml
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Download deployment Kubeconfig file from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.target_kubeconfig.conf
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Copy management_kubeconfig to target_kubeconfig
+          copy:
+            remote_src: yes
+            src: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/target_kubeconfig
+
+        - name: Copy management_kubeconfig to bootstrap_kubeconfig
+          copy:
+            remote_src: yes
+            src: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/management_kubeconfig
+            dest: /{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/bootstrap_kubeconfig
+
+        - name: Create config.yml 1 files
+          copy:
+            remote_src: yes
+            src: /tmp/{{ deployment_id }}.env.yml
+            dest: '{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/config.yml'
+
+        - name: create config.yml files
+          copy:
+            dest: '{{ capo_config_path }}/{{ deployment_id }}/config.yml'
+            content: |
+              context: {{ deployment_id }}
+
+        - name: Delete env file from tmp directory
+          file:
+            path: /tmp/{{ deployment_id }}.env.yml
+            state: absent
+
+    - name: CAPO Cluster healthcheck
+      block:
+        - name: Add CAPO Image path role
+          include_role:
+            name: capo_getimage_path
+
+        - name: Add CAPO set context role
+          include_role:
+            name: capo_setcontext
+
+        - name: execute healthcheck for {{ deployment_id }}
+          command: "{{ ccdadm_bin }} cluster healthcheck --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"

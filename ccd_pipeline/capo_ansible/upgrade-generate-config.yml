@@ -1,0 +1,135 @@
+---
+# Playbook to Update the node & ephemeral Image names for a Deployment config.yml on the Build server.
+# Image Names are Updated with the CAPO Upgrade Version:
+# - de-capo-<Upgrade Version>-node
+# - de-capo-<Upgrade Version>-ephemeral
+# Once Updated, Deployment config.yml is then uploaded to MinIO as the new <deployment_id>.env.yml
+# Value of Upgrade Version is retrieved from Deployment DTT entry.
+#
+# This playbook is used as part of the Upgrade Pipeline.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook upgrade-generate-config.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook upgrade-generate-config.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Generate the CAPO Upgrade Configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: add_buildserver_host
+      vars:
+        use_upgrade_build_server: yes
+    - role: utils_deployment_vars
+      vars:
+        add_vars:
+          - dtt
+  tasks:
+    - name: Verify CCD Version & Upgrade Version defined
+      assert:
+        that:
+          - dtt_ccd_version is defined
+          - dtt_upgrade_ccd_version is defined
+        fail_msg:
+          - Either CCD Version or Upgrade Version not present on Deployment ( {{ deployment_id }} ) DTT Entry.
+          - Please verify product configuration contains 'version' & 'upgrade_version'
+          - CAPO Upgrade Cannot Proceed.
+          - Exiting Playbook!
+
+    - name: Block to Verify Current & Upgrade CAPO Version Present on Build Server
+      delegate_to: "{{ build_server_ip }}"
+      block:
+        - name: Check if capo-{{ dtt_ccd_version }} & capo-{{ dtt_upgrade_ccd_version }} Images Present
+          find:
+            paths: '{{ capo_image_path }}'
+            file_type: directory
+            use_regex: yes
+            patterns: "^capo-({{ dtt_ccd_version }}|{{ dtt_upgrade_ccd_version }}).*$"
+          register: images_search
+
+        - name: Verify Both Images Present
+          assert:
+            that:
+              - images_search.files | length > 0
+              - current_image | length > 0
+              - upgrade_image | length > 0
+            fail_msg:
+              - Either Current Version or Upgrade Version Image not found on Build Server.
+              - Location Searched - {{ capo_image_path }}
+              - Images Searched >
+                   (current_image - capo-{{ dtt_ccd_version }})
+                   (upgrade_image - capo-{{ dtt_upgrade_ccd_version }})
+              - CAPO Upgrade Cannot Proceed.
+              - Exiting Playbook!
+          vars:
+            current_image: "{{ images_search.files | selectattr('path','contains',dtt_ccd_version) | list  }}"
+            upgrade_image: "{{ images_search.files | selectattr('path','contains',dtt_upgrade_ccd_version) | list  }}"
+
+        - name: Block to Locate Deployment Context Directory & Config File
+          vars:
+            current_image: "{{ images_search.files | selectattr('path','contains',dtt_ccd_version) | list | first  }}"
+          block:
+            - name: Check if Deployment Context Directory Present
+              find:
+                paths: '{{ current_image.path }}'
+                file_type: directory
+                use_regex: yes
+                patterns: ".*{{ deployment_id }}.*"
+              register: context_search
+
+            - name: Verify Deployment Context Directory Present
+              assert:
+                that:
+                  - context_search.files | length > 0
+                fail_msg:
+                  - Could not Locate Context Directory {{ deployment_id }}.
+                  - Location Searched - {{ current_image.path }}
+                  - CAPO Upgrade Cannot Proceed.
+                  - Exiting Playbook!
+
+            - name: Check if Deployment Config File Present
+              stat:
+                path: "{{ (context_search.files | first).path }}/{{ deployment_id }}/config.yml"
+              register: config_search
+
+            - name: Verify Deployment Config File Present
+              assert:
+                that:
+                  - config_search.stat.exists
+                fail_msg:
+                  - Could not Locate Deployment Config File config.yml.
+                  - Location Searched - {{ (context_search.files | first).path }}/{{ deployment_id }}/
+                  - CAPO Upgrade Cannot Proceed.
+                  - Exiting Playbook!
+
+        - name: Update Deployment Config File, Set ephemeral & node Image Names with CCD upgrade version
+          replace:
+            path: "{{ config_search.stat.path }}"
+            regexp: "{{ item.regex }}"
+            replace: "{{ item.name }}"
+          loop:
+            - name: de-capo-{{ trimmed_upgrade_version }}-node
+              regex: de-capo-.*-node
+            - name: de-capo-{{ trimmed_upgrade_version }}-ephemeral
+              regex: de-capo-.*-ephemeral
+          vars:
+            trimmed_upgrade_version: "{{ dtt_upgrade_ccd_version.split('-')[:2] | join('-') }}"
+
+        - name: Upload Deployment Config File into MinIO bucket (Deployment .env File)
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            encrypt: no
+            bucket: de-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+            src: "{{ config_search.stat.path }}"
+            mode: put
+            ignore_nonexistent_bucket: True

@@ -1,0 +1,172 @@
+#Verify network port security and subnet dhcp set as expected for dualstack ipv6 support
+---
+- name: Get ip_version value from DTT
+  set_fact:
+    ip_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+  vars:
+    products_qry: "[? product_type_name == 'CCD'].configuration"
+    config_qry: "[? key_name == 'ip_version'].key_value"
+  ignore_errors: true
+
+- name: Execute block for ip_version dualstack OR dualstackipv6
+  when: ( ip_version|lower  == "dualstack" or ip_version|lower  == "ipv6" )
+  block:
+  - name: include deployment_id role
+    include_role:
+      name: deployment_id
+
+  - name: include project-info-dtt role
+    include_role:
+      name: project-info-dtt
+
+  - name: Get NetworkGGN value from DTT
+    set_fact:
+      networkggn: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].configuration"
+      config_qry: "[? key_name == 'networkGGN'].key_value"
+    ignore_errors: true
+
+  - name: Get CCD last deployed env file from Minio
+    aws_s3:
+      aws_access_key: "{{ minio_access_key }}"
+      aws_secret_key: "{{ minio_secret_key }}"
+      s3_url: "{{ minio_url }}"
+      bucket: de-cni
+      object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+      mode: getstr
+      ignore_nonexistent_bucket: True
+    register: env_vars
+    ignore_errors: yes
+
+  - name: Imports vars
+    set_fact:
+      env_vars_detail: "{{ env_vars.contents | from_yaml }}"
+    when: "env_vars is not failed"
+
+  - name: Assign previous network vars from last CCD deploy
+    set_fact:
+      network_id: "{{ env_vars_detail.parameters.director_external_network }}"
+    when: "env_vars is not failed"
+
+  - name: Retrieve cloud Name from cloud Authentication URL
+    set_fact:
+      cloud_name: "{{ cloud_auth_url | regex_replace(':13000/v3') }}"
+
+  - name: Authenticating to cloud {{ cloud_name }}
+    uri:
+      method: POST
+      url: "{{ cloud_name }}:13000/v3/auth/tokens/"
+      body_format: json
+      body:
+            {
+              "auth": {
+                "identity": {
+                  "methods": [
+                    "password"
+                  ],
+                  "password": {
+                    "user": {
+                      "name": "{{ proj_username }}",
+                      "domain": {
+                        "id": "default",
+                        "name": "default"
+                      },
+                      "password": "{{ proj_password }}"
+                    }
+                  }
+                },
+                "scope": {
+                  "project": {
+                    "id": "{{ proj_uuid }}"
+                  }
+                }
+              }
+            }
+      return_content: yes
+      status_code: 201
+    register: authentication_result
+
+  - name: Get network details for ggn network {{ network_id }}
+    uri:
+      url: '{{ cloud_name }}:13696/v2.0/networks.json?id={{ network_id }}&fields=port_security_enabled'
+      method: GET
+      body_format: json
+      return_content: true
+      headers:
+        Accept: application/json
+        X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+      body:
+    register: network
+
+  - name: Fetch port security status on ggn network {{ network_id }}
+    set_fact:
+      port_security: "{{ network.json | json_query('networks[0].port_security_enabled') }}"
+
+  #- name: Checking port security is disabled
+  #  fail:
+  #    msg: port security is enabled for network {{ network_id }}
+  #  when: port_security | lower == "true"
+  #  ignore_errors: true
+
+  - name: Disable port security for ggn network {{ network_id }}
+    uri:
+      method: PUT
+      url: '{{ cloud_name }}:13696/v2.0/networks/{{ network_id }}'
+      body: { "network": { "port_security_enabled": false } }
+      body_format: json
+      return_content: yes
+      headers:
+        Accept: application/json
+        X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+      status_code: 200
+    when: port_security | lower == "true"
+
+  - name: Fetch subnets for {{ network_id }}
+    uri:
+      url: '{{ cloud_name }}:13696/v2.0/subnets?network_id={{ network_id }}'
+      method: GET
+      body_format: json
+      return_content: true
+      headers:
+        Accept: application/json
+        X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+      body:
+    register: subnet
+
+  - name: Retrieve IPv6 subnet id
+    set_fact:
+      ipv6_subnet: "{{ subnet.json | to_json | from_json | json_query(subnet_query) }}"
+    vars:
+      subnet_query: "subnets[?contains(name, 'ipv6' )] | [0].id"
+
+  - name: Fetch subnet details for {{ ipv6_subnet }}
+    uri:
+      method: GET
+      url: '{{ cloud_name }}:13696/v2.0/subnets?network_id={{ network_id }}&id={{ ipv6_subnet }}&fields=enable_dhcp'
+      body_format: json
+      return_content: yes
+      headers:
+        Accept: application/json
+        X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+      status_code: 200
+    register: enable_dhcp_status
+
+  - name: Retrieve enable_dhcp status for {{ ipv6_subnet }}
+    set_fact:
+      dhcp_status: "{{ enable_dhcp_status.json | json_query('subnets[0].enable_dhcp') }}"
+
+  - name: Disable DHCP on the ggn ipv6 subnet
+    uri:
+      method: PUT
+      url: '{{ cloud_name }}:13696/v2.0/subnets/{{ ipv6_subnet }}'
+      body: { "subnet": { "enable_dhcp": false } }
+      body_format: json
+      return_content: yes
+      headers:
+        Accept: application/json
+        X-Auth-Token: "{{ authentication_result.x_subject_token }}"
+      status_code: 200
+    when: dhcp_status | lower == "true"
+
+  ignore_errors: true

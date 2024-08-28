@@ -1,0 +1,179 @@
+---
+#~# Playbook to perform Post-upload configuration to an uploaded template
+
+- name: Apply Uploaded Node Post Steps
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    deploy_vsphere_env: podb-vcenter_env.yml
+  roles:
+    - deployment_id
+
+  tasks:
+    - name: Pull down {{ deploy_vsphere_env }} from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: "cloud"
+        object: "{{ item }}"
+        dest: /tmp/{{ item }}
+        mode: get
+      loop:
+        - "{{ deploy_vsphere_env }}"
+
+    - name: Include retrieved {{ deploy_vsphere_env }}
+      include_vars: /tmp/{{ deploy_vsphere_env }}
+
+    - name: Permit Root Login
+      vmware_vm_shell:
+        hostname: '{{ deploy_vsphere_host }}'
+        username: '{{ deploy_vsphere_user }}'
+        password: '{{ deploy_vsphere_password }}'
+        datacenter: '{{ deploy_vsphere_datacenter }}'
+        folder: '{{ deploy_vsphere_folder }}/Templates'
+        validate_certs: no
+        vm_id: "{{ node_name }}"
+        vm_username: "root"
+        vm_password: "shroot"
+        vm_shell: /bin/sed
+        vm_shell_args: -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+    - name: Apply the DHCP config to the VM
+      vmware_vm_shell:
+        hostname: '{{ deploy_vsphere_host }}'
+        username: '{{ deploy_vsphere_user }}'
+        password: '{{ deploy_vsphere_password }}'
+        datacenter: '{{ deploy_vsphere_datacenter }}'
+        folder: '{{ deploy_vsphere_folder }}/Templates'
+        validate_certs: no
+        vm_id: "{{ node_name }}"
+        vm_username: "root"
+        vm_password: "shroot"
+        vm_shell: /bin/echo
+        vm_shell_args: '{{ item }}'
+      loop:
+        - BOOTPROTO=dhcp > /etc/sysconfig/network/ifcfg-eth0
+        - DEFROUTE=yes >> /etc/sysconfig/network/ifcfg-eth0
+        - NAME=eth0 >> /etc/sysconfig/network/ifcfg-eth0
+        - STARTMODE=auto >> /etc/sysconfig/network/ifcfg-eth0
+        - DEVICE=eth0 >> /etc/sysconfig/network/ifcfg-eth0
+        - IPADDR= >> /etc/sysconfig/network/ifcfg-eth0
+        - NETMASK= >> /etc/sysconfig/network/ifcfg-eth0
+        - USERCONTROL=no >> /etc/sysconfig/network/ifcfg-eth0
+        - default 10.32.234.1 - - > /etc/sysconfig/network/routes
+
+    - name: Reboot the VM to apply config & obtain IP address
+      vmware_guest:
+        hostname: "{{ deploy_vsphere_host }}"
+        username: "{{ deploy_vsphere_user }}"
+        password: "{{ deploy_vsphere_password }}"
+        datacenter: '{{ deploy_vsphere_datacenter }}'
+        folder: '{{ deploy_vsphere_folder }}/Templates'
+        validate_certs: no
+        name: "{{ node_name }}"
+        state: rebootguest
+        wait_for_ip_address: yes
+      register: vm_info
+
+    - name: Add {{ node_name }} as an inventory host
+      add_host:
+        name: "{{ vm_info.instance.ipv4 }}"
+        groups: template_vm
+        ansible_user: "{{ vm_user }}"
+        ansible_ssh_pass: "{{ vm_pass }}"
+      when: vm_info.instance.ipv4 is defined and vm_info.instance.ipv4|length>0
+
+    - name: Add node_name as a temporary var in {{ deploy_vsphere_env }} for future use (to shutdown VM)
+      lineinfile:
+        create: yes
+        state: present
+        mode: 0666
+        path: '/tmp/{{ deploy_vsphere_env }}'
+        line: 'node_name: {{ node_name }}'
+
+- name: Apply Post Steps to VM
+  hosts: template_vm
+  gather_facts: false
+  tasks:
+    - name: Create eccd user on {{ inventory_hostname }}
+      user:
+        name: eccd
+        password: "{{ 'password' | password_hash('sha512') }}"
+        groups: users
+
+    - name: Add Sudo rights for eccd user & add NameServer
+      lineinfile:
+        create: yes
+        state: present
+        mode: 0666
+        path: '{{ item.file }}'
+        line: '{{ item.line }}'
+      loop:
+        - file: /etc/sudoers.d/90-eccd-user
+          line: eccd  ALL=(ALL) NOPASSWD:ALL
+        - file: /etc/resolv.conf
+          line: nameserver 159.107.173.12
+
+    - name: Restart network
+      systemd:
+        name: network
+        state: restarted
+
+    - name: Add the required Zypper Repos & Refresh
+      command: "{{ item }}"
+      args:
+        warn: no
+      register: zypper_repo
+      loop:
+        - zypper addrepo https://arm.sero.gic.ericsson.se/artifactory/proj-suse-repos-rpm-local/SLE15/SLE-Product-SLES/x86_64/ SLES15
+        - zypper addrepo https://arm.sero.gic.ericsson.se/artifactory/proj-suse-repos-rpm-local/SLE15/SLE-15-SP1-Module-Basesystem/x86_64/ SLES15-Base
+        - zypper addrepo https://arm.sero.gic.ericsson.se/artifactory/proj-suse-repos-rpm-local/SLE15/SLE-15-SP1-Module-Python2/x86_64/ SLES15-Python
+        - zypper addrepo http://download.opensuse.org/distribution/leap/15.1/repo/oss/ OSS
+        - zypper --gpg-auto-import-keys refresh
+      changed_when: zypper_repo.changed
+
+    - name: Install python-xml
+      command: zypper -n install --force-resolution python-xml
+      args:
+        warn: no
+      register: xml_installed
+      changed_when: '"already installed" not in xml_installed.stdout'
+
+    - name: Install pip
+      zypper:
+        name: python2-pip
+        state: present
+
+    - name: Install docker
+      pip:
+        name: docker
+
+- name: Power Off Node
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    deploy_vsphere_env: podb-vcenter_env.yml
+  vars_files: /tmp/{{ deploy_vsphere_env }}
+  tasks:
+    - name: Shutdown {{ node_name }} VM
+      vmware_guest:
+        hostname: "{{ deploy_vsphere_host }}"
+        username: "{{ deploy_vsphere_user }}"
+        password: "{{ deploy_vsphere_password }}"
+        datacenter: '{{ deploy_vsphere_datacenter }}'
+        folder: '{{ deploy_vsphere_folder }}/Templates'
+        validate_certs: no
+        name: "{{ node_name }}"
+        state: poweredoff
+
+    - name: Cleanup & Delete local temp files
+      file:
+        path: /tmp/{{ item }}
+        state: absent
+      loop:
+        - "{{ deploy_vsphere_env }}"
+#~# End Playbook
+...

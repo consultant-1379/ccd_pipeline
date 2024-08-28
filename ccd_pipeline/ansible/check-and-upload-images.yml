@@ -1,0 +1,162 @@
+# Check if required images exist in OpenStack. If not, upload from build server.
+
+- hosts: localhost
+  gather_facts: no
+  vars:
+    dit_url: http://atvdit.athtem.eei.ericsson.se
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - dtt
+  tasks:
+    - name: Get DIT Project Link from DTT Deployments CCD Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: '{{ dit_project_link }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: '{{ get_dit_project.json }}'
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: '{{ dit_url }}/api/pods/{{ dit_project.pod_id }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Cloud as variable
+      set_fact:
+        dit_pod: '{{ get_dit_pod.json }}'
+
+    - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+      set_fact:
+        ccd_flavor_name: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+    - name: Get CCD Flavor Template file from Minio
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: templates
+        object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: ccd_flavor_template
+
+    - name: Import variables from flavor template file
+      set_fact:
+        template_vars: "{{ ccd_flavor_template.contents|from_yaml }}"
+
+    - name: Save ccd version into variable on local
+      set_fact:
+        ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+    - name: Download openstack credentials from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_access_key }}"
+        aws_secret_key: "{{ minio_secret_key }}"
+        s3_url: "{{ minio_url }}"
+        bucket: tools
+        object: openstack_creds.yml
+        mode: getstr
+        ignore_nonexistent_bucket: True
+      register: openstack_access
+
+    - name: Import variables from openstack creds file
+      #no_log: yes
+      set_fact:
+        openstack_access_vars: "{{ openstack_access.contents|from_yaml }}"
+
+    - name: Set openstack username and password vars from openstack creds var
+      #no_log: yes
+      set_fact:
+        openstack_user: "{{ openstack_access_vars.openstack_user }}"
+        openstack_password: "{{ openstack_access_vars.openstack_password }}"
+
+    - name: "Check cloud for existing version {{ ccd_version }} images"
+      os_image_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        image: "eccd-{{ ccd_version }}-{{ item }}"
+      register: result
+      with_items:
+        - "director"
+        - "node"
+
+    - name: Upload images to OpenStack cloud
+      block:
+        - name: Add build server host
+          include_role:
+            name: add_buildserver_host
+
+        - name: Find CCD {{ ccd_version }} image paths
+          find:
+            paths: /proj/ossststools/ECCD/IMAGES
+            file_type: file
+            use_regex: yes
+            recurse: yes
+            patterns: ".*{{ ccd_version }}.*qcow2$"
+          register: images
+          delegate_to: "{{ build_server_ip }}"
+
+        - name: Fail if image files not found
+          fail:
+            msg: Coud not find image files for CCD version {{ ccd_version }}
+          when: images.files | length < 2
+
+        - name: Upload director and node images
+          os_image:
+            auth:
+              auth_url: "{{ dit_pod.authUrl }}"
+              username: "{{ openstack_user }}"
+              password: "{{ openstack_password }}"
+              project_name: stsccdpipeline
+              project_domain_name: Default
+              user_domain_name: Default
+            name: "{{ item.name }}"
+            container_format: bare
+            disk_format: qcow2
+            state: present
+            filename: "{{ item.file }}"
+            properties:
+              cpu_arch: x86_64
+              distro: ubuntu
+          vars:
+            director: "[?contains(path, 'director')].path | [0]"
+            node: "[?contains(path, 'node')].path | [0]"
+          loop:
+            - name: "eccd-{{ ccd_version }}-director"
+              file: "{{ images.files | to_json | from_json | json_query(director) }}"
+            - name: "eccd-{{ ccd_version }}-node"
+              file: "{{ images.files | to_json | from_json | json_query(node) }}"
+          delegate_to: "{{ build_server_ip }}"
+      when: result.results[0].images | length == 0 or result.results[1].images | length == 0

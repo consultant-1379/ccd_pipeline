@@ -1,0 +1,55 @@
+# Prepare to deploy new CCD version
+# Download new CCD version image from erikube artifactory to build server
+
+# Input: CCD version to prepare as ccd_version
+---
+- hosts: localhost
+  gather_facts: no
+  vars:
+    erikube_url: https://arm.rnd.ki.sw.ericsson.se/artifactory/proj-erikube-generic-local/erikube/releases
+    ccd_release_cxp: CXP9036305 # OpenStack image-based install
+    ccd_image_path: /ccd/IMAGES/ # Path to CCD images on build server
+  tasks:
+    - name: Check for CCD version URL
+      uri:
+        method: GET
+        url: "{{ erikube_url }}/{{ ccd_version | mandatory }}"
+        return_content: yes
+        status_code: 200
+      register: release_files
+
+    - name: Look for CXP release file
+      vars:
+        regex_tgz: '"({{ ccd_release_cxp }}.+\.tgz)"'
+      set_fact:
+        tar_file: "{{ release_files.content | regex_search(regex_tgz, '\\1') }}"
+
+    - name: Fail if CXP release files not found
+      fail:
+        msg: Could not find {{ ccd_release_cxp }} files for CCD version {{ ccd_version }}
+      when: tar_file | length == 0
+
+    - name: Add build server host
+      include_role:
+        name: add_buildserver_host
+
+    - name: Ensure CCD v{{ ccd_version }} exists on build server
+      block:
+        - name: Find CCD v{{ ccd_version }} in {{ ccd_image_path }} path
+          find:
+            paths: "{{ ccd_image_path }}"
+            file_type: directory
+            use_regex: yes
+            patterns: "^eccd-{{ ccd_version }}.*$"
+          register: image_path
+
+        - name: Download and extract CCD v{{ ccd_version }} tar file
+          unarchive:
+            src: "{{ erikube_url }}/{{ ccd_version }}/{{ tar_file | first }}"
+            dest: "{{ ccd_image_path }}"
+            remote_src: yes
+            extra_opts:
+              # Strip out the top level CXP dir
+              - --strip-components=1
+          when: image_path.files | length == 0
+      delegate_to: "{{ build_server_ip }}"

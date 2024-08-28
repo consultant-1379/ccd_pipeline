@@ -1,0 +1,15 @@
+---
+- name: Ensure Flavor is Created on OpenStack
+  os_nova_flavor:
+    auth: "{{ cloud_auth }}"
+    state: present
+    name: '{{ flavor_name }}'
+    ram: '{{ ram }}'
+    vcpus: '{{ vcpus }}'
+    disk: "{{ disk | default (0) }}"
+    extra_specs: '{{ flavor_properties | default({}) }}'
+  register: flavor_results
+
+- name: Set the Flavor Result
+  set_fact:
+    osk_flavor_results: "{{ flavor_results.flavor }}"

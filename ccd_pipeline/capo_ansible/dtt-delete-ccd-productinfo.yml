@@ -1,0 +1,68 @@
+---
+- name: Delete DTT deployment predefined CCD product configuration fields
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost, atvdtt.athtem.eei.ericsson.se, object.athtem.eei.ericsson.se
+  vars:
+    s3_storage_url: "{{ minio_url }}/de-cni/ccd"
+    updated_configuration: []
+
+  roles:
+    - role: dtt # Get dtt_deployment and ddt_cookie
+      vars:
+        login: yes
+
+  tasks:
+    - name: Save deployment DTT ID as variable
+      set_fact:
+        deployment_dtt_id: '{{ dtt_deployment._id }}'
+
+    - name: Get Non-CCD DTT products
+      set_fact:
+        non_ccd_products: "{{ dtt_deployment.products | json_query(products_qry) }}"
+      vars:
+        products_qry: "[? product_type_name != 'CCD']"
+
+    - name: Get CCD DTT product
+      set_fact:
+        ccd_product: "{{ dtt_deployment.products | json_query(products_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD']"
+
+    - name: Delete deployment predefined product configuration fields
+      set_fact:
+        updated_configuration: "{{ updated_configuration + [item] }}"
+      loop: "{{ ccd_product.configuration | json_query(products_qry) }}"
+      vars:
+        products_qry:  "[? key_name == 'ccdFlavor' || key_name == 'networkGGN' || key_name == 'networkECN'\
+                        || key_name == 'vrouter' || key_name == 'ip_version' || key_name == 'exclude_cidrs'\
+                        || key_name == 'notes' || key_name == 'oi_edge_case' || key_name == 'post_script'\
+                        || key_name == 'client_vm']"
+
+    - name: Update deployment product with merged configuration
+      set_fact:
+        updated_product: "{{ ccd_product | default([]) | combine({ 'configuration': updated_configuration}) }}"
+
+    - name: Merge updated product with base deployment products list
+      set_fact:
+        updated_products: "{{ non_ccd_products + [updated_product] }}"
+
+    - name: Update deployment with merged products list
+      set_fact:
+         updated_deployment: "{{ dtt_deployment | default([]) | combine({ 'products': updated_products}) }}"
+
+    - name: "Update DTT deployment '{{ dtt_deployment_name }}' removing predefined CCD product configuration fields"
+      uri:
+        use_proxy: no
+        method: PUT
+        url: "{{ dtt_url }}/api/deployments/{{ deployment_dtt_id }}"
+        body: "{{ updated_deployment }}"
+        body_format: json
+        return_content: yes
+        status_code: 200
+        headers:
+          Cookie: "{{ dtt_cookie }}"
+      retries: 1
+      delay: 3

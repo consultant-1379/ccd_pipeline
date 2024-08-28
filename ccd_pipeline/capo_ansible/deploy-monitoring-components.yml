@@ -1,0 +1,347 @@
+---
+- name: Deploy Monitoring Components
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    # Variable for de-cni-prometheus
+    external_label_default:
+      declname: "{{ deployment_id }}"
+    ip_version: ipv4
+    kubeconfig_path: "/tmp/{{ deployment_id | mandatory }}.admin.conf"
+  roles:
+    - deployment_id
+    - dtt
+    - get_helm3_path
+  tasks:
+    - name: Get DIT link from DTT
+      set_fact:
+       dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Set DIT link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get DIT project
+      uri:
+        method: GET
+        url: "{{ dit_project_link }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Set DIT project
+      set_fact:
+        dit_project: "{{ get_dit_project.json }}"
+
+    - name: Check if {{ deployment_id }} is a DE-CNI managed ccd cluster
+      fail:
+        msg: "Fatal Error: {{ dit_project.name }} is not a DE-CNI managed cluster"
+      when: ( '_CCD_' not in dit_project.name and 'bmccd' not in deployment_id )
+
+    - name: Set de-cni-prometheus External Labels
+      vars:
+        products_query: "{{ dtt_deployment.products | json_query('[? product_type_name == `CCD`].configuration') }}"
+        dtt_products: "{{ products_query | first if products_query | length > 0 else [] }}"
+      block:
+        - name: Get ccd_version value from DTT
+          set_fact:
+            external_label_default: "{{
+              external_label_default | combine({
+                'label_ccd_version': (version_query | first).split('-') | first
+            }) }}"
+          when: version_query | length == 1
+          vars:
+            version_query: "{{ dtt_products | json_query('[? key_name == `version`].key_value') }}"
+
+        - name: Get deployment_type value from DTT
+          set_fact:
+            external_label_default: "{{
+              external_label_default | combine({
+                'deployment_type': (deployment_query | first) if deployment_query | length == 1 else 'ccd'
+              }) }}"
+          vars:
+            deployment_query: "{{ dtt_products | json_query('[? key_name == `ccd`].key_value') }}"
+
+        - name: "Get Deployment '{{ deployment_id }}' Program ID from DTT Deployment"
+          set_fact:
+            programid: "{{ dtt_deployment.program_id }}"
+          when: dtt_deployment.program_id is defined
+
+        # Get and Set Program ID for CCD Deployment in de-cni Prometheus External Label
+        - name: "Translate Deployment '{{ deployment_id }}' Program ID '{{ programid }}' to Program Name"
+          uri:
+            method: GET
+            url: "{{ dtt_url }}/api/programs/{{ programid }}"
+            return_content: yes
+            status_code: 200
+          register: get_program_name
+          until: get_program_name.json and get_program_name.json._id == programid
+          retries: 1
+          delay: 3
+          when: programid is defined
+
+        - name: Save DTT Deployment '{{ deployment_id }}' Program Name Variable
+          set_fact:
+            external_label_default: "{{
+              external_label_default | combine({
+                'program': get_program_name.json.name
+              }) }}"
+          when: get_program_name is defined
+
+    ## START - CIS-165549 ipv6 ingressctrl_loadbalancer_ip needed for dual stack pipeline
+
+    - name: Get ip_version value from DTT
+      set_fact:
+        ip_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'ip_version'].key_value"
+      ignore_errors: true
+
+    - name: Change K8s service to LoadBalancer for {{ deployment_id }} for dualstackipv6
+      when: ip_version|lower  == "dualstackipv6"
+      block:
+        - name: Download directorvip for dualstackipv6 for {{ deployment_id }}
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: de-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.directorvip.yml
+            mode: getstr
+            ignore_nonexistent_bucket: True
+          register: directorvip_output
+
+        - name: Set directorvip for dualstackipv6 for {{ deployment_id }}
+          set_fact:
+            directorvip: "{{ directorvip_output.contents |replace(('\n'),'') |replace('directorvip','') |replace('---:','')|trim }}"
+
+        - name: Download pem file for dualstackipv6 for {{ deployment_id }}
+          aws_s3:
+            aws_access_key: "{{ minio_access_key }}"
+            aws_secret_key: "{{ minio_secret_key }}"
+            s3_url: "{{ minio_url }}"
+            bucket: de-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.director.pem
+            dest: /tmp/eccd.pem
+            mode: get
+            ignore_nonexistent_bucket: True
+
+        - name: Change permissions for /tmp/eccd.pem for dualstackipv6 for {{ deployment_id }}
+          file:
+            path: "/tmp/eccd.pem"
+            state: file
+            mode: '600'
+
+        - name: Amend the kubernetes service type to LoadBalancer for dualstackipv6 for {{ deployment_id }}
+          shell: "cat templates/amend_ipv6_ccd_k8s_svc.sh | ssh -o StrictHostKeyChecking=no -i /tmp/eccd.pem eccd@{{ directorvip }}"
+          tags:
+            - skip_ansible_lint
+
+    ## END - CIS-165549 ipv6 ingressctrl_loadbalancer_ip needed for dual stack pipeline
+
+    - name: Include role get_kube_config for {{ deployment_id }}
+      include_role:
+        name: get_kube_config
+
+    # Create de-cni-monitoring namespace
+    - name: Create de-cni-monitoring namespace
+      k8s:
+        name: de-cni-monitoring
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    - name: Deploy Eventrouter to de-cni-monitoring namespace
+      include_role:
+        name: deploy_eventrouter
+      vars:
+        namespace: de-cni-monitoring
+        release_name: de-cni-eventrouter
+        elastic_url: http://ieatcnevelk1.athtem.eei.ericsson.se:9200
+
+    - name: Get etcd certs from monitoring namespace
+      k8s_info:
+        kind: Secret
+        api_version: v1
+        namespace: monitoring
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: etcd-certs-victoria
+      register: etcd_certs
+
+    - name: Create etcd certs in de-cni-monitoring namespace
+      k8s:
+        state: present
+        api_version: v1
+        kind: Secret
+        namespace: de-cni-monitoring
+        name: etcd-certs-victoria
+        kubeconfig: "{{ kubeconfig_path }}"
+        resource_definition:
+          type: Opaque
+          data: "{{ etcd_certs.resources[0].data }}"
+
+    - name: Get master nodes
+      k8s_info:
+        kind: Node
+        api_version: v1
+        kubeconfig: "{{ kubeconfig_path }}"
+        label_selectors:
+          - node-role.kubernetes.io/master
+      register: nodes
+
+    - name: Get master internal IPs
+      set_fact:
+        master_ips: "{{ query('flattened', nodes.resources | json_query('[].status.addresses[0].address')) }}"
+
+    - name: "Check if {{ deployment_id }} is a baremetal or VMware deployment"
+      set_fact:
+        is_baremetal: '{{ deployment_id | regex_search("^bmccd\d+") is not none  }}'
+        is_vmware: '{{ deployment_id | regex_search("^ccd-p[a-z]\d+") is not none  }}'
+
+    - debug:
+        msg: 'Deployment {{ deployment_id }} is a {{ "baremetal" if is_baremetal else ( "VMware" if is_vmware else "" ) }} CCD deployment'
+      when: is_baremetal or is_vmware
+
+    - name: Add helm3 stable & prometheus-community repo
+      kubernetes.core.helm_repository:
+        binary_path: "{{ helm_path }}"
+        name: "{{ item.name }}"
+        repo_url: "{{ item.url }}"
+      loop:
+        - name: prometheus-community
+          url: https://prometheus-community.github.io/helm-charts
+        - name: stable
+          url: https://charts.helm.sh/stable
+      register: chart_res
+      tags:
+        - skip_ansible_lint
+
+    - name: Install DE-CNI Prometheus on CCD cluster
+      tags:
+        - skip_ansible_lint
+      kubernetes.core.helm:
+        binary_path: "{{ helm_path }}"
+        name: "{{ item.name }}"
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: 40.5.0
+        namespace: de-cni-monitoring
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        values: "{{ item.helm_values }}"
+      loop:
+        - name: de-cni-prom-operator
+          helm_values:
+            alertmanager:
+              enabled: false
+            grafana:
+              enabled: false
+            nodeExporter:
+              enabled: false
+            prometheusOperator:
+              kubeletService:
+                namespace: "de-cni-monitoring"
+            kubelet:
+              namespace: "de-cni-monitoring"
+            prometheus:
+              enabled: false
+            kubeStateMetrics:
+              enabled: false
+        - name: de-cni-prometheus
+          helm_values:
+            alertmanager:
+              enabled: false
+            grafana:
+              enabled: false
+            prometheusOperator:
+              createCustomResource: false
+              enabled: false # come back to ??
+            prometheus-node-exporter:
+              service:
+                port: 9186
+                targetPort: 9186
+            prometheus:
+              prometheusSpec:
+                retention: 3d
+                externalLabels: "{{ external_label_default }}"
+                secrets:
+                  - etcd-certs-victoria
+              ingress:
+                enabled: true
+                hosts:
+                  - prom.{{ deployment_id }}.athtem.eei.ericsson.se
+            kubeEtcd:
+              endpoints: "{{ master_ips }}"
+              service:
+                port: 2379
+                targetPort: 2379
+              serviceMonitor:
+                scheme: https
+                insecureSkipVerify: true
+                caFile: /etc/prometheus/secrets/etcd-certs-victoria/etcd-ca
+                certFile: /etc/prometheus/secrets/etcd-certs-victoria/etcd-cert
+                keyFile: /etc/prometheus/secrets/etcd-certs-victoria/etcd-key
+
+    - name: Apply the neccessary patch operations
+      kubernetes.core.k8s_json_patch:
+        kind: "{{ item.kind }}"
+        namespace: de-cni-monitoring
+        name: "{{ item.name }}"
+        patch:
+          - op: remove
+            path: /metadata/ownerReferences
+      ignore_errors: true
+      loop:
+        - kind: StatefulSet
+          name: prometheus-de-cni-prometheus-kube-pro-prometheus
+        - kind: ConfigMap
+          name: prometheus-de-cni-prometheus-kube-pro-prometheus-rulefiles-0
+
+    # Update metricsBindAddress of ConfigMap kube-proxy
+    - name: Get current configuration of ConfigMap kube-proxy
+      k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: kube-proxy
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: configmap_output
+
+    - name: Apply the changes to ConfigMap kube-proxy
+      k8s:
+        state: present
+        resource_definition: "{{ configmap_output.resources|replace('[::1]:10249', '0.0.0.0:10249') }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+
+    # Delete the pods with label "k8s-app=kube-proxy" to make the changes effective
+    - name: Get pod list with label "k8s-app=kube-proxy"
+      k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+        label_selectors:
+          - k8s-app=kube-proxy
+      register: pod_list
+
+    - name: Delete the pods with label "k8s-app=kube-proxy"
+      k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        namespace: kube-system
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: "{{ item }}"
+      loop:
+        - "{{ pod_list.resources | map(attribute='metadata.name') | list }}"
+
+- include: controlplane-enable-metrics.yml
+- include: add-ccd-to-prom.yml

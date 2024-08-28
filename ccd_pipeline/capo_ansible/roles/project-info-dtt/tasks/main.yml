@@ -1,0 +1,56 @@
+---
+# Role to fetch openstack project info from DTT
+# For further information check README.md
+# Required variables:
+#   deployment_id
+  # Retrieve Project DIT link from DTT CCD Deployments
+  - name: Get DIT Project Link from DTT Deployments CCD Product
+    set_fact:
+      dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+    vars:
+      products_qry: "[? product_type_name == 'CCD'].links"
+      links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+  - name: Parse Project View link into Project API GET Link
+    set_fact:
+      dit_project_link: "{{  dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+  # Retrieve Project information
+  - name: Get Project from DIT
+    uri:
+      method: GET
+      url: "{{ dit_project_link }}"
+      return_content: yes
+      status_code: 200
+    register: get_dit_project
+    until: get_dit_project.json
+    retries: 1
+    delay: 3
+
+  - name: Save DIT Project as variable
+    set_fact:
+      dit_project: "{{ get_dit_project.json }}"
+
+  # Retrieve project POD information. Project UUID info is saved here
+  - name: Get Project Cloud from DIT
+    uri:
+      method: GET
+      url: "{{ dit_url }}/api/pods/{{ dit_project.pod_id }}"
+      return_content: yes
+      status_code: 200
+    register: get_dit_pod
+    until: get_dit_pod.json
+    retries: 1
+    delay: 3
+
+  - name: Save DIT Project-Cloud as variable
+    set_fact:
+      dit_pod: "{{ get_dit_pod.json }}"
+
+  - name: Save Project information
+    set_fact:
+      proj_username: "{{ dit_project.username }}"
+      proj_password: "{{ dit_project.password }}"
+      proj_uuid: "{{ dit_project.id }}"
+      proj_name: "{{ dit_project.name }}"
+      cloud_auth_url: "{{ dit_pod.authUrl }}"

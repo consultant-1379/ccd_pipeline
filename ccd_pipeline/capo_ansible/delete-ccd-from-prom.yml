@@ -1,0 +1,83 @@
+---
+- name: Get Prometheus server details and add as host
+  hosts: localhost
+  gather_facts: false
+  become: false
+  roles:
+    - deployment_id
+    - prometheus
+
+- name: Delete CCD target from prometheus
+  hosts: prometheus
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ccd_url: "{{ url_prefix }}.{{ deployment_id }}.{{ url_domain }}"
+
+  tasks:
+    - name: Get a list of existing active targets from prometheus API
+      uri:
+        url: http://{{ ansible_default_ipv4.address }}:9090/api/v1/targets
+        method: GET
+        return_content: yes
+        status_code: 200
+        body_format: json
+      register: result
+      retries: 1
+      delay: 1
+
+    - name: Store list of current active targets in fact activeTargets
+      set_fact: activeTargets={{ result | json_query('json.data.activeTargets[].discoveredLabels.__address__') }}
+
+    - name: set fact "ccd_added" to yes if "{{ ccd_url }} is in  fact activeTargets
+      set_fact:
+        ccd_active: "{{ y_var if ccd_url in activeTargets else n_var }}"
+      vars:
+        y_var: yes
+        n_var: no
+
+    - name: Print debug to show if the {{ ccd_url }} already in activeTargets
+      debug:
+        msg: "CCD already in prometheus ?  {{ ccd_active | string }} "
+
+    - name: Remove ccd prometheus URL from ccd-list.conf file
+      lineinfile:
+        path: /etc/prometheus/{{ ccd_list_file }}
+        regex: '^.*"{{ url_prefix }}.{{ deployment_id }}.{{ url_domain }}".*$'
+        state: absent
+      register: target_remove_result
+      when: ccd_active
+
+    - name: Print debug message when {{ ccd_list_file }} has been updated
+      debug:
+        msg: "Changed = {{ target_remove_result.changed }} , {{ target_remove_result.msg }}  from /etc/prometheus/{{ ccd_list_file }}"
+      when: ccd_active
+
+    - name: sleep for 5 seconds to allow file_sd in prometheus to pick up change to {{ ccd_list_file }}
+      wait_for:
+        timeout: 5
+      when: ccd_active
+
+    - name: Check if ccd  target has been added to  in prometheus active targets
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}:9090/api/v1/targets"
+        method: GET
+        return_content: yes
+        status_code: 200
+        body_format: json
+      register: result
+      retries: 1
+      delay: 1
+
+    - name: Capture list of current active targets  in fact activeTargets
+      set_fact: activeTargets={{ result | json_query('json.data.activeTargets[].discoveredLabels.__address__')  }}
+
+    - name: set fact "ccd_added" to yes|no if "{{ ccd_url }} is in fact activeTargets
+      set_fact:
+        ccd_active: "{{ y_var if ccd_url in activeTargets else n_var }}"
+      vars:
+        y_var: yes
+        n_var: no
+
+    - debug:
+        msg: "Is the CCD target {{ ccd_url }} in the activeTarget?  {{ ccd_active | string }} "
+      failed_when: ccd_active

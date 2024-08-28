@@ -1,0 +1,265 @@
+---
+- name: Retrieve the vCenter Environment Details from MinIO
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: cloud
+    object: "{{ deploy_vsphere_env }}"
+    dest: /tmp/{{ deploy_vsphere_env }}
+    mode: get
+  tags: [never,deploy,delete]
+
+- name: Include retrieved {{ deploy_vsphere_env }}
+  include_vars: /tmp/{{ deploy_vsphere_env }}
+  tags: [never,deploy,delete]
+
+- name: Set the vcenter cluster {{ cluster }} vars
+  set_fact:
+    vcenter_cluster: "{{ cluster }}"
+    vcenter_datastore: "{{ deploy_vsphere_clusters[cluster].vms }}"
+    pv_datastore: "{{ 'DS-Pod-B-CCD_CL1_PVtest-3PAR_12-VV18' if 'test' in deployment_id else \
+      deploy_vsphere_clusters[cluster].apps | select('match', '.*' + '_PV0' + deployment_id[-1] + '.*') | list | first }}"
+  when: "cluster in deploy_vsphere_clusters"
+  tags: [never,deploy,delete]
+
+- name: Fail if Cluster Vars Missing
+  fail:
+    msg: Please Verify cluster[{{ cluster }}] & Environment file {{ deploy_vsphere_env }} on MinIO
+  when: >
+    (vcenter_cluster is not defined or vcenter_cluster|length<1) or
+    (vcenter_datastore is not defined or vcenter_datastore|length<1) or
+    (pv_datastore is not defined or pv_datastore|length<1)
+  tags: [never,deploy,delete]
+
+#~# Tasks for deploying a VM from a template
+- name: Deploy {{ deployment_id }} VMs
+  block:
+  - name: Create deployment sub-folder {{ deployment_id }}
+    vcenter_folder:
+      hostname: '{{ deploy_vsphere_host }}'
+      username: '{{ deploy_vsphere_user }}'
+      password: '{{ deploy_vsphere_password }}'
+      validate_certs: no
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder_name: "{{ deployment_id }}"
+      folder_type: vm
+      parent_folder: '{{ deploy_vsphere_folder }}'
+      state: present
+    delegate_to: localhost
+
+  - name: Deploy {{ deployment_id }} VMs from template {{ vm_template }}
+    vmware_guest:
+      hostname: '{{ deploy_vsphere_host }}'
+      username: '{{ deploy_vsphere_user }}'
+      password: '{{ deploy_vsphere_password }}'
+      validate_certs: no
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      cluster: '{{ vcenter_cluster }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      name: '{{ item.hostname }}'
+      annotation: "Node cloned from {{ vm_template }}"
+      guest_id: '{{ guest_id }}'
+      disk:
+      - size_gb: "{{ item.guest_disk_size_gb }}"
+        datastore: "{{ vcenter_datastore }}"
+      hardware:
+        memory_mb: '{{ item.guest_memory }}'
+        num_cpus: '{{ item.guest_vcpu }}'
+      networks: '{{ item.network_config }}'
+      customization:
+        dns_servers: '{{ guest_dns_server }}'
+        domain : '{{ guest_domain_name }}'
+        hostname: '{{ item.hostname }}'
+      template: '{{ vm_template }}'
+      state: poweredon
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: sleep for 60 seconds to allow VMs & VMware Tools to power up fully
+    wait_for:
+      timeout: 60
+    delegate_to: localhost
+
+  - name: Apply Network config to {{ deployment_id }} VMs
+    vmware_guest:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      validate_certs: no
+      name: "{{ item.hostname }}"
+      networks: '{{ item.network_config }}'
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: Power off {{ deployment_id }} VMs
+    vmware_guest:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      validate_certs: no
+      name: "{{ item.hostname }}"
+      state: poweredoff
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: Power on {{ deployment_id }} VMs
+    vmware_guest:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      validate_certs: no
+      name: "{{ item.hostname }}"
+      state: poweredon
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: Generate list of Master VM hostnames for anti-affinity rule creation
+    set_fact:
+      master_list: "{{ master_list | default([]) + [ item.hostname ] }}"
+    loop: "{{ vms_to_deploy | to_json | from_json | json_query(master_query) }}"
+    vars:
+      master_query: "[?contains(hostname, 'master')]"
+
+  - name: Apply Anti-Affinity Rule for {{ deployment_id }} Master VMs
+    vmware_vm_vm_drs_rule:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      cluster_name: "{{ vcenter_cluster }}"
+      validate_certs: no
+      enabled: True
+      vms: "{{ master_list }}"
+      drs_rule_name: "{{ deployment_id }}-anti-affinity_master"
+      mandatory: True
+      affinity_rule: False
+    delegate_to: localhost
+    when: (master_list is defined and master_list|length>0)
+
+  - name: Generate list of Application Worker VM hostnames for anti-affinity rule creation
+    set_fact:
+      application_list: "{{ application_list | default([]) + [ item.hostname ] }}"
+    loop: "{{ vms_to_deploy | to_json | from_json | json_query(application_query) }}"
+    vars:
+      application_query: "[?contains(hostname, 'worker')] | [?contains(hostname, 'application')]"
+
+  - name: Apply Anti-Affinity Rule for {{ deployment_id }} Application Worker VMs
+    vmware_vm_vm_drs_rule:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      cluster_name: "{{ vcenter_cluster }}"
+      validate_certs: no
+      enabled: True
+      vms: "{{ application_list }}"
+      drs_rule_name: "{{ deployment_id }}-anti-affinity_application"
+      mandatory: True
+      affinity_rule: False
+    delegate_to: localhost
+    when: (application_list is defined and application_list|length>0)
+
+  - name: Generate list of Router Worker VM hostnames for anti-affinity rule creation
+    set_fact:
+      router_list: "{{ router_list | default([]) + [ item.hostname ] }}"
+    loop: "{{ vms_to_deploy | to_json | from_json | json_query(router_query) }}"
+    vars:
+      router_query: "[?contains(hostname, 'worker')] | [?contains(hostname, 'router')]"
+
+  - name: Apply Anti-Affinity Rule for {{ deployment_id }} Router Worker VMs
+    vmware_vm_vm_drs_rule:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      cluster_name: "{{ vcenter_cluster }}"
+      validate_certs: no
+      enabled: True
+      vms: "{{ router_list }}"
+      drs_rule_name: "{{ deployment_id }}-anti-affinity_router"
+      mandatory: True
+      affinity_rule: False
+    delegate_to: localhost
+    when: (router_list is defined and router_list|length>0)
+
+  tags: [never,deploy]
+
+
+#~# Tasks for deleting a VM
+- name: Delete {{ deployment_id }} VMs
+  block:
+  - name: Add the govc role when deleting (Needed for Datastore PV deletion)
+    include_role:
+      name: install-govc-dependency
+      apply:
+        tags:
+          - delete
+
+  - name: Delete Anti-Affinity Rules for deployment {{ deployment_id }}
+    vmware_vm_vm_drs_rule:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      cluster_name: "{{ vcenter_cluster }}"
+      validate_certs: no
+      drs_rule_name: "{{ item }}"
+      state: absent
+    delegate_to: localhost
+    loop:
+      - "{{ deployment_id }}-anti-affinity_master"
+      - "{{ deployment_id }}-anti-affinity_application"
+      - "{{ deployment_id }}-anti-affinity_router"
+
+  - name: Power off {{ deployment_id }} virtual machines before deletion
+    vmware_guest:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      validate_certs: no
+      name: "{{ item.hostname }}"
+      state: poweredoff
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: Delete {{ deployment_id }} VMs
+    vmware_guest:
+      hostname: "{{ deploy_vsphere_host }}"
+      username: "{{ deploy_vsphere_user }}"
+      password: "{{ deploy_vsphere_password }}"
+      datacenter: '{{ deploy_vsphere_datacenter }}'
+      folder: '{{ deploy_vsphere_folder }}/{{ deployment_id }}'
+      validate_certs: no
+      name: "{{ item.hostname }}"
+      state: absent
+    delegate_to: localhost
+    loop: "{{ vms_to_deploy }}"
+
+  - name: Delete fcd directory in Datastore "{{ pv_datastore }}"
+    command: "/tmp/govc datastore.rm -ds={{ pv_datastore }} fcd"
+    environment:
+      GOVC_URL: "https://{{ deploy_vsphere_ip }}/sdk"
+      GOVC_USERNAME: "{{ deploy_vsphere_user }}"
+      GOVC_PASSWORD: "{{ deploy_vsphere_password }}"
+      GOVC_INSECURE: true
+    register: pv_ds_info
+    changed_when: pv_ds_info.changed
+
+  tags: [never,delete]
+
+- name: Cleanup & Delete Govc package & vCenter Environment Details locally
+  file:
+    path: /tmp/{{ item }}
+    state: absent
+  loop:
+    - "{{ deploy_vsphere_env }}"
+    - "govc"
+  tags: [never,deploy,delete]
+
+#~# End Role
+...

@@ -1,0 +1,12 @@
+---
+- name: Create Volume on OpenStack
+  os_volume:
+    auth: "{{ cloud_auth }}"
+    state: present
+    size: "{{ volume_size }}"
+    display_name: "{{ volume_name }}"
+  register: volume_results
+
+- name: Set the Volume Create Result
+  set_fact:
+    osk_volume_results: "{{ volume_results }}"

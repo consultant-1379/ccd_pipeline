@@ -1,0 +1,32 @@
+---
+# Get DDT details for a deployment
+# Optionally log in
+# Input variable(s):
+#   deployment_id - Deployment ID
+#   login - Optional flag to log into DTT
+# Output variable(s):
+#   dtt_deployment - URI response from DTT for deployment
+#   ddt_cookie - DTT login cookie if login was enabled
+
+- name: Get DTT name from {{ deployment_id }}
+  set_fact:
+    dtt_name: "{{ deployment_id | regex_replace('^ccd-') }}"
+
+- name: "Get {{ deployment_id }} details from DTT"
+  uri:
+    method: GET
+    url: "{{ dtt_url }}/api/deployments?q=name={{ dtt_name }}"
+    return_content: yes
+    status_code: "200"
+  register: dtt_deployment_resp
+  until: dtt_deployment_resp.json[0] and dtt_deployment_resp.json[0].name == dtt_name
+  retries: 1
+  delay: 3
+
+- name: Set dtt_deployment from response
+  set_fact:
+    dtt_deployment: "{{ dtt_deployment_resp.json[0] }}"
+
+- name: Log in to DTT
+  import_tasks: login.yml
+  when: login is true

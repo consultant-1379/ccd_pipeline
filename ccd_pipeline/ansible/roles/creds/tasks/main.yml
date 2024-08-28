@@ -1,0 +1,25 @@
+---
+# Get credentials from Minio and assign to a variable
+# Supports Vault encrypted files and vars
+#
+# Required parameters:
+#  name: Name of variable to use
+#  file: Filename in Minio
+
+- name: Get credentials from Minio
+  aws_s3:
+    aws_access_key: "{{ minio_access_key }}"
+    aws_secret_key: "{{ minio_secret_key }}"
+    s3_url: "{{ minio_url }}"
+    bucket: tools
+    object: "{{ file | mandatory }}"
+    mode: get
+    dest: "/tmp/{{ file }}"
+    ignore_nonexistent_bucket: True
+  notify: Remove creds file
+
+- name: Assign vars to "{{ name | mandatory }}"
+  include_vars:
+    name: "{{ name }}"
+    file: "/tmp/{{ file }}"
+  no_log: yes

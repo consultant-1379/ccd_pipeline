@@ -1,0 +1,16 @@
+---
+# Validate that deployment ID is defined & Has a valid value
+# Input variable(s):
+#   deployment_id - Deployment ID
+
+- name: Verify deployment_id is defined
+  assert:
+    that:
+      - deployment_id is defined and deployment_id
+      - deployment_id | length > 0
+      - deployment_id != '*'
+    fail_msg:
+      - Issue with required var 'deployment_id'
+      - It must be defined & cannot be '' or '*'
+      - Valid Example - ccd-c10a001
+      - Exiting Playbook!

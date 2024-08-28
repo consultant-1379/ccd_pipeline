@@ -1,0 +1,32 @@
+pipeline {
+  agent {
+    node {
+      label 'capo_pipeline_jenkins_agent'
+    }
+  }
+  environment {
+    VAULT_FILE = credentials('ccd_pipeline_secret')
+  }
+  // The options directive is for configuration that applies to the whole job.
+  options {
+    buildDiscarder(logRotator(numToKeepStr:'30'))
+    timeout(time: 40, unit: 'MINUTES')
+    timestamps()
+  }
+  stages {
+    stage('Update Deployment Config') {
+      steps {
+        sh "cd capo_ansible; ansible-playbook -vvv -e deployment_id=${deployment_id} --vault-password-file $VAULT_FILE upgrade-generate-config.yml"
+      }
+    }
+  }
+  // The post build actions
+  post {
+    success {
+      echo 'Pipeline Successfully Completed'
+    }
+    failure {
+      echo 'Pipeline Failed'
+    }
+  }
+}

@@ -1,0 +1,108 @@
+---
+- name: Leave the OQS Queue
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    oqs_timeout: 270
+    dtt_status: In Use
+    login: true
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+
+    - name: Set DTT deployment id
+      set_fact:
+        dtt_deployment_id: "{{ dtt_deployment_resp.json[0]._id }}"
+
+    - name: Get DIT link from DTT
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Set DIT link
+      set_fact:
+        dit_project_link: "{{  dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get DIT project
+      uri:
+        method: GET
+        url: "{{ dit_project_link }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Set DIT project
+      set_fact:
+        dit_project: "{{ get_dit_project.json }}"
+
+    - name: Get DIT pod data
+      uri:
+        method: GET
+        url: "{{ dit_url }}/api/pods/{{ dit_project.pod_id }}"
+        return_content: yes
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Set DIT pod
+      set_fact:
+        dit_pod: "{{ get_dit_pod.json }}"
+
+    - name: Set DIT pod name for use as OQS pod name
+      set_fact:
+        dit_pod_name: "{{ dit_pod.name | regex_replace('^Cloud') }}"
+
+    - name: Set DIT project for use as OQS deployment name
+      set_fact:
+        dit_project_name: "{{ dit_project.name }}"
+
+    - name: Get OQS id for deployment {{ dit_project_name }}
+      uri:
+        method: GET
+        url: "{{ oqs_url }}/api/deployments/search?name={{ dit_project_name }}"
+        return_content: yes
+        status_code: 200
+      register: oqs_deployment
+      retries: 1
+      delay: 3
+
+    - name: Set OQS JSON payload for {{ deployment_id }}
+      set_fact:
+        oqs_json_payload: >
+               { 'name': "{{ dit_project_name }}", 'associatedPod': "Cloud{{ dit_pod_name }}", 'queueStatus': "Finished",
+                 'jobType': "Install", 'product': "CCD" }
+
+    - name: Leave the OQS queue for deployment {{ dit_project_name  }}
+      uri:
+        method: PUT
+        url: "{{ oqs_url }}/api/deployments/{{ oqs_deployment.json[0]._id }}"
+        body: "{{ oqs_json_payload }}"
+        body_format: json
+        return_content: yes
+        status_code: 200
+      retries: 1
+      delay: 3
+      register: update_msg
+      when: oqs_deployment.json[0].name is defined
+      failed_when: "'errors' in update_msg.content or update_msg.status != 200"
+
+    - name: Check OQS is set to Finished for deployment {{ dit_project_name  }}
+      uri:
+        method: GET
+        url: "{{ oqs_url }}/api/deployments/search?name={{ dit_project_name }}"
+        return_content: yes
+        status_code: 200
+      register: oqs_deployment
+      until: oqs_deployment.json[0].queueStatus == "Finished"
+      retries: 60
+      delay: 5

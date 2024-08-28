@@ -1,0 +1,160 @@
+---
+# Playbook to Verify that the required CAPO Images for a Deployment are present.
+# Check is performed against the Deployments OpenStack Tenancy.
+# If Images not Present:
+# Playbook attempts to locate Images on Build Server & Uploads to OpenStack.
+# If Images already Present:
+# No action taken & Playbook Completes Successfully
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Optional Vars:
+# - search_image_dir
+#     > String - Path to Images Location
+#     > Default - /ccd/IMAGES
+#     > Example Override - /ccd/IMAGES/STAGING
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook check-and-upload-images.yml -e deployment_id=<deployment_id> --ask-vault-pass [ -e search_image_dir=/path/to/dir ]
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook check-and-upload-images.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file [ -e search_image_dir=/path/to/dir ]
+#
+- hosts: localhost
+  gather_facts: no
+  vars:
+    dit_url: http://atvdit.athtem.eei.ericsson.se
+    ip_version: "not defined"
+    use_upgrade_build_server: true
+  roles:
+    - dtt
+    - verify_dualstack_network
+  tasks:
+    - name: Get DIT Project Link from DTT Deployments CAPO Product
+      set_fact:
+        dit_project_view_link: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(links_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].links"
+        links_qry: "[? link_name == 'DIT_Openstack_Project'].url"
+
+    - name: Parse Project View link into Project API GET Link
+      set_fact:
+        dit_project_link: "{{ dit_project_view_link | regex_replace('projects/view', 'api/projects') }}"
+
+    - name: Get Project from DIT
+      uri:
+        method: GET
+        url: '{{ dit_project_link }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_project
+      until: get_dit_project.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Project as variable
+      set_fact:
+        dit_project: '{{ get_dit_project.json }}'
+
+    - name: Get Projects Cloud from DIT
+      uri:
+        method: GET
+        url: '{{ dit_url }}/api/pods/{{ dit_project.pod_id }}'
+        return_content: 'yes'
+        status_code: 200
+      register: get_dit_pod
+      until: get_dit_pod.json
+      retries: 1
+      delay: 3
+
+    - name: Save DIT Cloud as variable
+      set_fact:
+        dit_pod: '{{ get_dit_pod.json }}'
+
+    ## Register ccd version into variable.
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+    - name: Download openstack credentials from MinIO
+      include_role:
+        name: creds
+      vars:
+        name: openstack_access_vars
+        file: openstack_creds.yml
+
+    - name: Set openstack username and password vars from openstack creds var
+      no_log: yes
+      set_fact:
+        openstack_user: "{{ openstack_access_vars.openstack_user }}"
+        openstack_password: "{{ openstack_access_vars.openstack_password }}"
+
+    - name: "Check cloud for existing version {{ ccd_version }} images"
+      os_image_info:
+        auth:
+          auth_url: "{{ dit_pod.authUrl }}"
+          username: "{{ openstack_user }}"
+          password: "{{ openstack_password }}"
+          project_name: stsccdpipeline
+          project_domain_name: Default
+          user_domain_name: Default
+        image: "eccd-capo-{{ ccd_version }}-{{ item }}"
+      register: result
+      with_items:
+        - "ephemeral"
+        - "node"
+
+    - name: Upload images to OpenStack cloud
+      when: result.results[0].images == [] or result.results[1].images == []
+      block:
+        - name: Add CAPO get image path role
+          include_role:
+            name: capo_getimage_path
+
+        - name: Find CAPO {{ ccd_version }} image paths
+          find:
+            paths: "{{ ccdadm_dir }}"
+            file_type: file
+            use_regex: yes
+            recurse: yes
+            patterns: 
+              - '{{ item }}.*\.img$'
+          register: images
+          with_items:
+            - "ephemeral"
+            - "node"
+
+        - name: Fail if image files not found
+          fail:
+            msg: Cound not CAPO image files for CAPO version {{ ccd_version }}
+          when: images.results[0].files[0].path | length <= 0 or images.results[1].files[0].path | length <= 0
+
+        - name: Upload ephemeral and node images
+          os_image:
+            auth:
+              auth_url: "{{ dit_pod.authUrl }}"
+              username: "{{ openstack_user }}"
+              password: "{{ openstack_password }}"
+              project_name: stsccdpipeline
+              project_domain_name: Default
+              user_domain_name: Default
+            name: "{{ item.name }}"
+            container_format: bare
+            disk_format: raw
+            state: present
+            filename: "{{ item.file }}"
+            is_public: true
+            properties:
+              cpu_arch: x86_64
+              distro: ubuntu
+          loop:
+            - name: "eccd-capo-{{ ccd_version }}-ephemeral"
+              file: "{{ images.results[0].files[0].path | string | regex_search('.*ephemeral.*') }}"
+            - name: "eccd-capo-{{ ccd_version }}-node"
+              file: "{{ images.results[1].files[0].path | string | regex_search('.*node.*') }}"

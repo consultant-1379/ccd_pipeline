@@ -1,0 +1,51 @@
+---
+#~# Playbook for changing status in DTT at the end of the CCD Deploy pipeline
+
+- name: Change status of entry in DTT to "In Use"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    dtt_status: In Use
+# Enable flag to log into DTT
+    login: true
+  roles:
+    - deployment_id
+    - dtt
+
+  tasks:
+    - name: Save Deployment DTT ID as variable & get current DTT status
+      set_fact:
+        deployment_dtt_id: '{{ dtt_deployment_resp.json[0]._id }}'
+        current_status: '{{ dtt_deployment_resp.json[0].status }}'
+
+    - name: >
+        Assign deployment_changes var for '{{ dtt_name }}'
+        update if current DTT status is not {{ dtt_status }}
+      set_fact:
+        deployment_changes: "{{ deployment_changes | default({})  | combine({item.key: item.value}) }}"
+      with_items:
+        - key: 'status'
+          value: "{{ dtt_status }}"
+      when: current_status != dtt_status
+
+    - name: >
+        Update status for Deployment '{{ dtt_name }}' to
+        '{{ dtt_status }}' on DTT if current DTT status is not '{{ dtt_status }}'
+      uri:
+        use_proxy: no
+        method: PUT
+        url: "{{ dtt_credentials.dtt_url }}/api/deployments/{{ deployment_dtt_id }}"
+        body: "{{ deployment_changes }}"
+        body_format: json
+        return_content: yes
+        status_code: 200
+        headers:
+          Cookie: "{{ dtt_cookie }}"
+      register: returned_dtt_results
+      retries: 1
+      delay: 3
+      when: current_status != dtt_status
+
+#~# End Playbook
+...

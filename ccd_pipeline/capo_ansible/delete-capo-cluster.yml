@@ -1,0 +1,151 @@
+---
+# Playbook to Delete CAPO Cluster.
+#
+# Required Vars:
+# - deployment_id = String - Example ( ccd-c10a001 )
+#
+# Example usage
+# -------------
+# Manually enter ansible vault passwd:
+# $ ansible-playbook delete-capo-cluster.yml -e deployment_id=<deployment_id> --ask-vault-pass
+#
+# Retrieve ansible vault passwd from file:
+# $ ansible-playbook delete-capo-cluster.yml -e deployment_id=<deployment_id> --vault-password-file /path/to/file
+#
+- name: Delete CCD Stack from Openstack Project {{ deployment_id }}
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    use_upgrade_build_server: true
+  roles:
+    - deployment_id
+
+  tasks:
+    - name: "Get Deployment '{{ deployment_id }}' from DTT"
+      include_role:
+        name: dtt
+
+    # Register ccd version into variable.
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+    - name: Delete CAPO CCD cluster
+      block:
+        - name: Search for CAPO {{ ccd_version }} Image
+          find:
+            paths: "{{ capo_image_path }}"
+            file_type: directory
+            recurse: yes
+            use_regex: yes
+            patterns: ".*{{ ccd_version }}.*"
+          register: image_search_res
+
+        - name: Check the Cluster deploy directory In Image Results
+          find:
+            paths: "{{ item.path }}"
+            file_type: directory
+            use_regex: yes
+            patterns: ".*{{ deployment_id }}.*"
+          register: cluster_dir_search
+          loop: "{{image_search_res.files}}"
+          when: image_search_res.files | length > 0
+
+        - name: Set variable for {{ ccd_version }} directory
+          set_fact:
+            ccdadm_dir: "{{ (clus_dir | first).item.path }}"
+          vars:
+            clus_dir: "{{cluster_dir_search.results | selectattr('matched','equalto',1) | list }}"
+          when: clus_dir | length == 1
+
+        - name: Block for when no Deployment context Folder found but Image found
+          when:
+            - ccdadm_dir is not defined
+            - image_search_res.files | length > 0
+          block:
+            - name: Download Deployment Environment file from MinIO
+              aws_s3:
+                aws_access_key: "{{ minio_access_key }}"
+                aws_secret_key: "{{ minio_secret_key }}"
+                s3_url: "{{ minio_url }}"
+                bucket: sts-cni
+                object: /ccd/{{ deployment_id }}/{{ deployment_id }}.capo.env.yml
+                dest: /tmp/{{ deployment_id }}.env.yml
+                mode: get
+                ignore_nonexistent_bucket: True
+
+            - name: Ensure directory '{{ deployment_id }}' exists in '{{ capo_config_path }}'
+              file:
+                path: '{{ capo_config_path }}/{{ item }}'
+                state: directory
+              loop:
+                - "{{ deployment_id }}"
+                - "{{ deployment_id }}/{{ deployment_id }}"
+
+            - name: Create config.yml 1 files
+              copy:
+                remote_src: yes
+                src: /tmp/{{ deployment_id }}.env.yml
+                dest: '{{ capo_config_path }}/{{ deployment_id }}/{{ deployment_id }}/config.yml'
+
+            - name: create config.yml files
+              copy:
+                dest: '{{ capo_config_path }}/{{ deployment_id }}/config.yml'
+                content: |
+                  context: {{ deployment_id }}
+
+            - name: Set variable for {{ ccd_version }} directory
+              set_fact:
+                ccdadm_dir: "{{ image_search_res.files[0].path }}"
+
+            - name: Delete env file from tmp directory
+              file:
+               path: /tmp/{{ deployment_id }}.env.yml
+               state: absent
+
+        - name: Get the ccdadm exectuable for CAPO {{ ccd_version }}
+          find:
+            paths: "{{ ccdadm_dir }}"
+            file_type: file
+            recurse: yes
+            use_regex: yes
+            patterns: "ccdadm"
+          register: ccdadm
+          when: ccdadm_dir is defined
+
+        - name: Verify vars ccdadm_dir & ccdadm are Defined
+          assert:
+            that:
+              - ccdadm_dir is defined
+              - ccdadm is defined
+            fail_msg:
+              - Directory for "{{ deployment_id }}" could not be found.
+              - Unable to locate the correct Image to use.
+              - Either the cluster is already undeployed or Wrong Image specified.
+              - Please Verify. Exiting Playbook!
+
+        - name: Set ccdadm executable path variable
+          set_fact:
+            ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+        - name: Add CAPO set context role
+          include_role:
+            name: capo_setcontext
+
+        - name: Perform CAPO undeploy
+          include_role:
+            name: capo_undeploy
+
+        - name: Perform CAPO undefine
+          include_role:
+            name: capo_undefine-cluster
+
+        - name: Confirm deletion of {{ deployment_id }} directory
+          file:
+            path: "{{ capo_config_path }}/{{ deployment_id }}"
+            state: absent

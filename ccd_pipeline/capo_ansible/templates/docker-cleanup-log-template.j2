@@ -1,0 +1,22 @@
+##~## Verifying Containers in Server - {{ date_for_log }} ##~##
+##~~~~~~~~~~~~~~~~## Summary ##~~~~~~~~~~~~~~~~##
+Lists:
+  - Current List: {{ current_docker_list|length }}
+  - Keep List:  {{ keep_list|length }}
+  - Exception List: {{ list_exceptions|length }}
+  - Missing List: {{ absent_exceptions|length }}
+  - Flagged for size: {{ flagged_size_list|length }}
+  - Flagged for age: {{ flagged_age_list|length }}
+##~~~~~~~~~~~~~~## Lists ##~~~~~~~~~~~~~~##
+{% for item in list_exceptions %}
+[{{ date_for_log }}][WARNING][{{ item }}] Container from Server not found on Keep List.
+{% endfor %}
+{% for item in absent_exceptions %}
+[{{ date_for_log }}][WARNING][{{ item }}] Item from Keep List not found on Server.
+{% endfor %}
+{% for item in flagged_size_list %}
+[{{ date_for_log }}][WARNING][{{ item }}] Container greater than 200Mb.
+{% endfor %}
+{% for item in flagged_age_list %}
+[{{ date_for_log }}][WARNING][{{ item }}] Container 12 months or older.
+{% endfor %}

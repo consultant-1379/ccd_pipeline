@@ -1,0 +1,205 @@
+---
+- name: Create CCD HEAT Stack on OpenStack
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+  roles:
+    - deployment_id
+
+  tasks:
+    # Get CCD Version
+    - name: Get CCD Version
+      block:
+        - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+          command: >
+            lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+          register: sftp_result
+          ignore_errors: yes
+    
+        - name: Parse JSON content
+          set_fact:
+            deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+        - name: Display the variable
+          debug:
+            var: deployment_data
+
+        - name: Get ccd flavor name
+          set_fact:
+            ccd_flavor_name: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+        - name: Get DIT Project Location from DTT Deployments CCD Product
+          set_fact:
+            get_dit_project_location: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | lower }}"
+          vars:
+           products_qry: "[? product_type_name == 'CCD'].location"
+
+        - name: Save DIT Project Location as variable
+          set_fact:
+            dit_project_location: "{{ get_dit_project_location[0] }}"
+
+        - name: Download flavor template file which contains ccd version from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            bucket: templates
+            object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.template.yml
+            mode: getstr
+            ignore_nonexistent_bucket: True
+          register: template_file
+
+        - name: Import variables from flavor template file
+          set_fact:
+            template_vars: "{{ template_file.contents|from_yaml }}"
+
+        # Register ccd version into variable.
+        - name: Save ccd version into variable on local
+          set_fact:
+            ccd_version: "{{ template_vars.parameters.ccd_version }}"
+
+    - name: Download images from sftp
+      block:
+        - name: Ensure local download directory exists
+          file:
+            path: "/tmp/images"
+            state: directory
+
+        - name: download images from XDN SFTP
+          command:  >
+            lftp -u {{ sftp_user }},{{ sftp_password }} -e 
+            'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";
+            set ftp:proxy ;
+            mirror ccd_pipeline/images /tmp/images;exit'
+            sftp://{{ sftp_host }}
+          register: sftp_result_upload
+        
+        - name: Display results of SFTP download
+          debug:
+            var: sftp_result_upload
+
+        - name : Unpack images
+          command: "/bin/bash -c 'cd /tmp/images && for item in $(ls | grep {{ ccd_version }} | grep tgz); do tar xvfz $item; done'"
+
+
+    - name: Find CCD image folder path
+      find:
+        paths: /tmp/images
+        file_type: "directory"
+        use_regex: yes
+        patterns: "^.*{{ ccd_version }}.*$"
+        follow: yes
+      register: image_path
+
+
+    - name: Download ccd stack environment file from MinIO
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        bucket: sts-cni
+        object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+        dest: /tmp/{{ deployment_id }}.env.yml
+        mode: get
+        ignore_nonexistent_bucket: True
+
+    - name: Import variables from ccd environment file to get OpenStack credentials
+      include_vars:
+        file: /tmp/{{ deployment_id }}.env.yml
+
+    - name: Create ccd stack on OpenStack
+      os_stack:
+        verify: no
+        name: "{{ deployment_id }}"
+        state: present
+        template: "{{ image_path.files[0].path }}/templates/eccd.yaml"
+        environment: "/tmp/{{ deployment_id }}.env.yml"
+        timeout: 14400
+        auth:
+          username: "{{ parameters.ansible_variables.openstack_username }}"
+          project_name: "{{ parameters.ansible_variables.openstack_project_name }}"
+          password: "{{ parameters.ansible_variables.openstack_user_password }}"
+          auth_url: "{{ parameters.ansible_variables.openstack_auth_url }}"
+          user_domain_name: "{{ parameters.ansible_variables.openstack_domain_name }}"
+          project_domain_name: "{{ parameters.ansible_variables.openstack_domain_name }}"
+
+    - name: Get director VIP
+      os_port_info:
+        verify: no
+        filters:
+          name: directors-external-vip-port-{{ deployment_id }}
+        auth:
+          username: "{{ parameters.ansible_variables.openstack_username }}"
+          project_name: "{{ parameters.ansible_variables.openstack_project_name }}"
+          password: "{{ parameters.ansible_variables.openstack_user_password }}"
+          auth_url: "{{ parameters.ansible_variables.openstack_auth_url }}"
+          user_domain_name: "{{ parameters.ansible_variables.openstack_domain_name }}"
+          project_domain_name: "{{ parameters.ansible_variables.openstack_domain_name }}"
+      register: director_vip_port
+
+    - name: Set director IP
+      set_fact:
+        director_ip: "{{ director_vip_port.ports[0].fixed_ips[0].ip_address }}"
+
+    - name: Create file {{ deployment_id }}.directorvip.yml which contains VIP
+      copy:
+        dest: "/tmp/{{ deployment_id }}.directorvip.yml"
+        content: |
+          ---
+          directorvip: {{ director_ip }}
+
+    - name: Get director host with director IP overridden
+      include_role:
+        name: add_director_host_xdn
+
+    - name: Copy K8s conf and private SSH key from director to ansible host
+      fetch:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        flat: yes
+      loop:
+        - src: /home/eccd/.kube/config
+          dest: /tmp/{{ deployment_id }}.admin.conf
+        - src: /home/eccd/.ssh/id_rsa
+          dest: /tmp/{{ deployment_id }}.director.pem
+      delegate_to: "{{ director_ip }}"
+
+    - name: Replace admin url in K8s conf file {{ deployment_id }}.admin.conf
+      replace:
+        path: /tmp/{{ deployment_id }}.admin.conf
+        regexp: "https://nodelocal-api.eccd.local:6443"
+        replace: "https://api.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ deployment_data.dit_project_location }}.xgic.ericsson.se"
+
+    - name: Upload deployment files into MinIO bucket
+      aws_s3:
+        aws_access_key: "{{ minio_xdn_access_key }}"
+        aws_secret_key: "{{ minio_xdn_secret_key }}"
+        s3_url: "{{ minio_xdn_url }}"
+        encrypt: no
+        bucket: sts-cni
+        object: "/ccd/{{ deployment_id }}/{{ item }}"
+        src: "/tmp/{{ item }}"
+        mode: put
+        ignore_nonexistent_bucket: True
+      loop:
+        - "{{ deployment_id }}.directorvip.yml"
+        - "{{ deployment_id }}.director.pem"
+        - "{{ deployment_id }}.admin.conf"
+
+    - name: Remove temp files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/{{ deployment_id }}.env.yml"
+        - "/tmp/{{ deployment_id }}.directorvip.yml"
+        - "/tmp/{{ deployment_id }}.director.pem"
+        - "/tmp/{{ deployment_id }}.admin.conf"
+        - "/tmp/ccd_stack_templates/{{ ccd_version }}"
+

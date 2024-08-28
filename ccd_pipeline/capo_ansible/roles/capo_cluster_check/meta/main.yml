@@ -1,0 +1,5 @@
+# Dependent role execution
+---
+dependencies:
+  - role: dtt
+    when: dtt_deployment is not defined

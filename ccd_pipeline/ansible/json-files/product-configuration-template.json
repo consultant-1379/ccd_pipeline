@@ -1,0 +1,26 @@
+[
+  {
+    "key_name": "version",
+    "key_value": "VERSION_VALUE"
+  },
+  {
+    "key_name": "ccd.env.yml",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.env.yml"
+  },
+  {
+    "key_name": "director.pem",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.director.pem"
+  },
+  {
+    "key_name": "directorvip.yml",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.directorvip.yml"
+  },
+  {
+    "key_name": "admin.conf",
+    "key_value": "S3_STORAGE_URL/DEPLOYMENT_ID/DEPLOYMENT_ID.admin.conf"
+  },
+  {
+    "key_name": "cluster-monitoring",
+    "key_value": "http://10.59.130.93/d/jrqiTE3Zz/de-cni-ccd-healthcheck-eu?orgId=1&var-ClusterName=DEPLOYMENT_ID&var-declname=DEPLOYMENT_ID&kiosk=tv"
+  }
+]

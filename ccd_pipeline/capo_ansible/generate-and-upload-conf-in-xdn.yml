@@ -1,0 +1,696 @@
+---
+- name: Playbook to Generate the configuration required by CAPO
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    no_proxy: localhost,.athtem.eei.ericsson.se
+  vars:
+    total_ip_addresses_needed: 4
+    ## default IP version is IPv4, unless it is defined in DTT
+    ip_version: ipv4
+    cidrs_option: ""
+    user_script_option: ""
+    sftp_host: "sftp.sero.ict.ericsson.net" 
+
+  tasks:
+    - name: Download Deployment /tmp/ansible-facts-{{ deployment_id }}.json from sftp 
+      command: >
+        lftp -d -u {{ sftp_user }},{{ sftp_password }} -e 'set sftp:connect-program "ssh -o StrictHostKeyChecking=no";set ftp:proxy; get ccd_pipeline/deployments/ansible-facts-{{ deployment_id }}.json -o /tmp/ansible-facts-{{ deployment_id }}.json; exit' sftp://{{ sftp_host }}
+      register: sftp_result
+      ignore_errors: yes
+    
+    - name: Parse JSON content
+      set_fact:
+        deployment_data: "{{ lookup('file', '/tmp/ansible-facts-' ~ deployment_id ~ '.json') | from_json }}"
+
+    - name: Display the variable
+      debug:
+        var: deployment_data
+
+    ## Register ccd version into variable.
+    - name: Get ccd version
+      set_fact:
+        ccd_version: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+      vars:
+        products_qry: "[? product_type_name == 'CCD'].configuration"
+        config_qry: "[? key_name == 'version'].key_value"
+
+    - name: Generate the configuration file required by CAPO heat stack
+      block:
+        - name: Create temp config directory
+          file:
+            path: ./tmp-files
+            state: directory
+
+##  Start of CIS-154279: Backup the CCD ENV file from last install
+        - name: Download flavor template file which contains ccd version from MinIO
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml
+            dest: tmp-files/{{ deployment_id }}.env.yml.bak
+            mode: get
+            ignore_nonexistent_bucket: True
+          failed_when: false
+
+        - name: "Upload {{ deployment_id }}.env.yml into MinIO bucket"
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            encrypt: no
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.env.yml.bak
+            src: tmp-files/{{ deployment_id }}.env.yml.bak
+            mode: put
+            ignore_nonexistent_bucket: True
+          failed_when: false
+##  End of CIS-154279: Backup the CCD ENV file from last install
+
+
+##  Start CIS-169261: Inclusion of ipvs_exclude_cidrs option
+
+        - name: "Check in DTT for exclude_cidrs = yes"
+          set_fact:
+            cidrs_option: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'exclude_cidrs'].key_value"
+          ignore_errors: true
+
+##  End CIS-169261: Inclusion of ipvs_exclude_cidrs option
+
+## Start CIS-185030: cENM post_network_init needed in template-vmware-capo.yml
+
+        - name: "Check in DTT for post_script = yes"
+          set_fact:
+            user_script_option: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'post_script'].key_value"
+          ignore_errors: true
+
+        - name: Calculate number of additional ECFE IPs needed
+          set_fact:
+            remaining_ip_addresses_needed: "{{ total_ip_addresses_needed - deployment_data.dit_project.network.ipv4_ranges|length }}"
+
+        - name: Add ECFE IPs for Project in DIT
+          when: remaining_ip_addresses_needed|int > 0
+          block:
+            - name: Copy DIT Project Free Address JSON template file
+              copy:
+                src: json-files/dit-project-free-address-template.json
+                dest: json-files/{{ deployment_id }}-free-address.json
+
+            - name: Insert Project Name to DIT Project Free Address JSON file
+              replace:
+                path: json-files/{{ deployment_id }}-free-address.json
+                regexp: "PROJECT_NAME"
+                replace: "{{ deployment_data.dit_project.name }}"
+
+            - name: Insert Network Name to DIT Project Free Address JSON file
+              replace:
+                path: json-files/{{ deployment_id }}-free-address.json
+                regexp: "NETWORK_NAME"
+                replace: "{{ deployment_data.dit_project.network.name }}"
+
+            - name: Insert Pod Name to DIT Project Free Address JSON file
+              replace:
+                path: json-files/{{ deployment_id }}-free-address.json
+                regexp: "POD_NAME"
+                replace: "{{ deployment_data.dit_pod.name }}"
+
+            - name: Insert Number of Addresses Needed to DIT Project Free Address JSON file
+              replace:
+                path: json-files/{{ deployment_id }}-free-address.json
+                regexp: "9999"
+                replace: "{{ remaining_ip_addresses_needed }}"
+
+            - name: Save DIT Project Free Address JSON as Variable
+              set_fact:
+                deployment_free_address_json: "{{ lookup('file', 'json-files/{{ deployment_id }}-free-address.json') | from_json }}"
+
+
+        - name: Get DIT Project Location from DTT Deployments CCD Product
+          set_fact:
+            get_dit_project_location: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | lower }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].location"
+
+        - name: Save DIT Project Location as variable
+          set_fact:
+            dit_project_location: "{{ get_dit_project_location[0] }}"
+        
+        - name: "Get ingressctrl loadbalancer ip for test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ dit_project_location }}.xgic.ericsson.se"
+          set_fact:
+            ingressctrl_loadbalancer_ip: "{{ lookup('dig', 'test.{{ deployment_data.dtt_deployment.name }}.stsoss.{{ dit_project_location }}.xgic.ericsson.se') }}"
+
+        - name: "Find ingressctrl loadbalancer in the {{ total_ip_addresses_needed }} IPv4 ranges of the projects network"
+          set_fact:
+            ingress_ip_found: "{{ deployment_data.dit_project.network.ipv4_ranges | json_query(ip_range_qry) }}"
+          vars:
+            ip_range_qry: "[? start == '{{ ingressctrl_loadbalancer_ip }}' ||  end == '{{ ingressctrl_loadbalancer_ip }}']"
+
+        - name: Verify Ingressctrl loadbalancer IP was found in the IPv4 ranges of the projects network
+          fail:
+            msg: Ingressctrl loadbalancer IP was not found in the IPv4 ranges of the projects network
+          when: ingress_ip_found == []
+
+        ## Get IP Version of CCD
+        - name: Get CAPO deploy type default singlestack or dual_stack from DTT
+          set_fact:
+            ip_version: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'ip_version'].key_value"
+          ignore_errors: true
+
+        - name: Get list of ECFE pool CIDRs IPv4 range values
+          set_fact:
+            ecfe_pool_cidrs: "{{ ecfe_pool_cidrs|default([]) + [ item.start + '-' + item.end ] }}"
+          with_items: "{{ deployment_data.dit_project.network.ipv4_ranges }}"
+
+        ## Amend IPv6 ECFE IPs for DualStack
+        - name: Add IPv6 ECFE IP range for DualStack
+          set_fact:
+            ecfe_pool_cidrs: "{{ ecfe_pool_cidrs|default([]) + [ item.start + '-' + item.end ] }}"
+          with_items:
+            - "{{ deployment_data.dit_project.network.ipv6_ranges }}"
+          when: ( ip_version|lower  == "dualstack" or ip_version|lower  == "dualstackipv6" )
+
+        # ECCDSUPP-2473 support
+        - name: Assign ingress loadbalancer as IPv6
+          set_fact:
+            ingressctrl_loadbalancer_ip: "{{ deployment_data.dit_project.network.ipv6_ranges[0].start  }},{{ ingressctrl_loadbalancer_ip }}"
+          when: ip_version|lower  == "dualstackipv6"
+
+        - name: Assign ingress loadbalancer as IPv4
+          set_fact:
+            ingressctrl_loadbalancer_ip: "{{ ingressctrl_loadbalancer_ip }},{{ deployment_data.dit_project.network.ipv6_ranges[0].start }}"
+          when: ip_version|lower  == "dualstack"
+         # ECCDSUPP-2473 support
+
+        - name: Prepare Flavor Template Config File
+          block:
+            - name: Get CCD Flavor Template Link from DTT Deployments CCD Product
+              set_fact:
+                ccd_flavor_name: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+              vars:
+                products_qry: "[? product_type_name == 'CCD'].configuration"
+                config_qry: "[? key_name == 'ccdFlavor'].key_value"
+
+            ## Spike - Check how pipelines will be impacted by the new vyos on VMware solution CIS-157549
+            - name: Get CCD vrouter type from DTT
+              set_fact:
+                vrouter_type: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first }}"
+              vars:
+                products_qry: "[? product_type_name == 'CCD'].configuration"
+                config_qry: "[? key_name == 'vrouter'].key_value"
+              ignore_errors: true
+
+            - name: Get CCD Flavor Template file from Minio
+              aws_s3:
+                aws_access_key: "{{ minio_xdn_access_key }}"
+                aws_secret_key: "{{ minio_xdn_secret_key }}"
+                s3_url: "{{ minio_xdn_url }}"
+                bucket: templates
+                object: /managed-config/{{ ccd_flavor_name }}/{{ ccd_flavor_name }}.capo.env.yml
+                mode: getstr
+                ignore_nonexistent_bucket: True
+              register: ccd_flavor_template
+
+            - name: Save Flavor Template as base config yml file
+              copy:
+                content: "{{ ccd_flavor_template.contents }}"
+                dest: tmp-files/{{ deployment_id }}.env.yml
+
+        - name: Prepare Cloud Template Config File
+          block:
+
+            ## contd..Spike - Check how pipelines will be impacted by the new vyos on VMware solution CIS-157549
+            - name: Set Minio cloud template url for Openstack
+              set_fact:
+                minio_cloud_template: "/cloud/{{ deployment_data.dit_pod.name  | lower }}.template-capo.yml"
+              when : vrouter_type is undefined
+
+            - name: Set Minio cloud template url for Vmware
+              set_fact:
+                minio_cloud_template: "/cloud/{{ deployment_data.dit_pod.name  | lower }}.template-vmware-capo.yml"
+              when : vrouter_type is defined
+
+            - name: Get CCD Cloud Template file from Minio
+              aws_s3:
+                aws_access_key: "{{ minio_xdn_access_key }}"
+                aws_secret_key: "{{ minio_xdn_secret_key }}"
+                s3_url: "{{ minio_xdn_url }}"
+                bucket: templates
+                object: "{{ minio_cloud_template }}"
+                mode: getstr
+                ignore_nonexistent_bucket: True
+              register: ccd_cloud_template
+
+            - name: Save Cloud Template as config yml file
+              copy:
+                content: "{{ ccd_cloud_template.contents }}"
+                dest: tmp-files/{{ deployment_id }}-cloud.env.yml
+
+        - name: Assign target cloud
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "target_cloud:"
+            replace: "target_cloud: {{ deployment_data.dit_pod.name | lower }}"
+
+        - name: Merge Config YAML documents
+          shell: "cd tmp-files; yq m -i {{ deployment_id }}.env.yml {{ deployment_id }}-cloud.env.yml" # noqa 204 301
+
+        - name: Remove yq merge duplication
+          lineinfile:
+            dest: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "################################### Worker nodes variables #######################"
+            firstmatch: yes
+            line: ''
+
+        - name: Assign ingress loadbalancer ip
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "loadbalancer_ip:"
+            replace: "loadbalancer_ip: {{ ingressctrl_loadbalancer_ip }}"
+
+
+        - name: Assign apiserver {{deployment_id }}
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "<deployment_id>"
+            replace: "{{ deployment_id }}"
+        
+        - name: Assign apiserver {{deployment_id }} location
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "<site_location>"
+            replace: "{{ dit_project_location }}"
+
+        - name: Assign target cloud
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "cloud99:"
+            replace: "{{ deployment_data.dit_pod.name | lower }}:"
+
+        - name: Insert OS_USERNAME to Env file
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: 'OS_USERNAME_INPUT'
+            replace: '{{ deployment_data.dit_project.username }}'
+
+        - name: Insert OS_PASSWORD_INPUT to Env file
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: 'OS_PASSWORD_INPUT'
+            replace: '{{ deployment_data.dit_project.password }}'
+
+        - name: Insert OS_PROJECT_NAME to Env file
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: 'OS_PROJECT_NAME'
+            replace: '{{ deployment_data.dit_project.name }}'
+
+        - name: Insert OS_PROJECT_ID to Env file
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: 'OS_PROJECT_ID'
+            replace: '{{ deployment_data.dit_project.id }}'    
+      
+        - name: Check for DTT BGP myASN end user selection
+          set_fact:
+            bgp_my_asn: "{{ deployment_data.dtt_deployment.products | json_query(products_qry) | first | json_query(config_qry) | first  }}"
+          vars:
+            products_qry: "[? product_type_name == 'CCD'].configuration"
+            config_qry: "[? key_name == 'BGPmyASN'].key_value"
+
+
+        - name: Process DTT BGP myASN end user selection
+          when: bgp_my_asn is defined
+          block:         
+            - name: Check DTT BGP myASN value
+              when: bgp_my_asn is defined
+              fail:
+                msg: "{{ bgp_my_asn }} not a valid entry for DTT BGPmyASN"
+              when: bgp_my_asn is not regex("^[0-9]*$")
+
+            - name: Replace BGP myASN number with end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "bgp_myasn_number"
+                replace: "{{ bgp_my_asn }}"
+
+
+        - name: Gather Openstack networks info
+          include_role:
+            name: networking_from_openstack_xdn
+
+################### Singlestack support ###################
+
+        - name: Process singlestack networking
+          when: (ip_version | lower  == "ipv4")
+          block:
+            - name: Replace OAM network with end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "networkOAM"
+                replace: "{{ directors_network_selection }}"
+
+            - name: Replace OAM sub-network based on end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "- subnetOAM_ipv4"
+                replace: "  - \"{{ directors_network_selection }}-IPv4\""
+
+            - name: Replace Traffic network with end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "networkTraffic"
+                replace: "{{ workers_network_selection }}"
+
+            - name: Replace primary_peer_ip based on end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "primary_peer_ipv4"
+                replace: "{{ traffic_gw_hsrp_a }}"
+
+            - name: Replace secondary_peer_ip based on end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "secondary_peer_ipv4"
+                replace: "{{ traffic_gw_hsrp_b }}"
+
+            - name: Assign worker pools header
+              lineinfile:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                insertbefore: "worker_pools:"
+                line: "################################### Worker nodes variables #######################"
+
+################### Cleanup for singlestack only support ###################
+
+        - name: Process singlestack template for non used ipv6 references
+          when: (ip_version | lower  == "ipv4")
+          block:
+            - name: Assign template ipv6 references
+              set_fact:
+                internal_network_subnet_ipv6: "subnet_ipv6:"
+                internal_network_cidr: "cidr: \"fd00:eccd:0:c0c::/64\""
+                election_network_cidr: "cidr: \"fd01:eccd:0:c0c::/64\""
+                k8s_ingress_cluster_ipv6: "fd00:eccd:22:ffff::5555:250"
+                pod_cidr_blocks_ipv6: "- fd01:eccd:22:ffff::/64"
+                service_cidr_blocks_ipv6: "- fd00:eccd:22:ffff::5555:0/112"
+                peer_address_ipv6: "- peer-address: primary_peer_ipv6"
+                default_dualstack_ip_family: "default_dualstack_ip_family: ipv4"
+
+            - name: Remove internal network subnet_ipv6
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ internal_network_subnet_ipv6 }}"
+                state: absent
+
+            - name: Remove internal network ipv6 cidr
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ internal_network_cidr }}"
+                state: absent
+
+            - name: Remove election network ipv6 cidr
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ election_network_cidr }}"
+                state: absent
+
+            - name: Remove subnetOAM_ipv6 tag
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "- subnetOAM_ipv6"
+                state: absent
+
+            - name: Remove default_dualstack_ip_family
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "default_dualstack_ip_family"
+                state: absent
+
+            - name: Remove ingress_cluster_ip for ipv6
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: ",{{ k8s_ingress_cluster_ipv6 }}"
+                replace: ""
+
+            - name: Remove pool cidr blocks ipv6
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ pod_cidr_blocks_ipv6 }}"
+                state: absent
+
+            - name: Remove service cidr blocks ipv6
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ service_cidr_blocks_ipv6 }}"
+                state: absent
+
+            - name: Remove bgp ipv6 peers
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: '.*'
+                replace: ''
+                after: '- peer-address: primary_peer_ipv6'
+                before: '        hold-time'
+
+            - name: Remove bgp ipv6 blank lines
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: '(^\s*$)'
+                replace: ''
+                after: '- peer-address: primary_peer_ipv6'
+            
+            - name: Remove peer address ipv6
+              lineinfile:
+                dest: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "{{ peer_address_ipv6 }}"
+                state: absent
+
+            - name: Assign ecfe ips
+              lineinfile:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                insertafter: "addresses:"
+                line: "        {{ ecfe_pool_cidrs | to_nice_yaml | indent(8) }}"
+
+            - name: Assign ip version
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "ip_version:"
+                replace: "ip_version: {{ ip_version | lower }}"
+
+            - name: Assign special char
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "config:"
+                replace: "config: |"
+                after: "ecfe_enabled: true"
+
+################### Dualstack support ###################
+
+        - name: Process dualstack networking
+          when: (ip_version | lower  == "dualstack")
+          block:
+
+            # - name: Replace ggn sub-network based on end user selection
+            #   replace:
+            #     path: tmp-files/{{ deployment_id }}.env.yml
+            #     regexp: "- traffic_subnet_ipv6"
+            #     replace: "  - \"{{ traffic_subnet_ipv6 }}\""
+
+
+            - name: Replace primary_peer_ip based on end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "primary_peer_ipv6"
+                replace: "{{ traffic_gw_hsrp_a_ipv6}}"
+
+
+            - name: Replace secondary_peer_ip based on end user selection
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "secondary_peer_ipv6"
+                replace: "{{ traffic_gw_hsrp_b_ipv6 }}"
+
+            - name: Assign ip version
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "ip_version:"
+                replace: "ip_version: {{ ip_version | lower }}"
+
+            - name: Assign ecfe ips
+              lineinfile:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                insertafter: "addresses:"
+                line: "        {{ ecfe_pool_cidrs | to_nice_yaml | indent(8) }}"
+
+            - name: Assign special char
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                regexp: "config:"
+                replace: "config: |"
+                after: "ecfe_enabled: true"
+
+##  End ## Register ccd version into variable.
+
+        - name: Assign image version {{ ccd_version }} to template in {{ deployment_id }}.env.yml
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: "8888"
+            replace: "{{ ccd_version }}"
+
+##  Start CIS-169261: Inclusion of ipvs_exclude_cidrs option
+
+        - name: "Check for Inclusion of CIDRs in ENV file for {{ deployment_id }}"
+          when: (cidrs_option | lower == "true" and ip_version | lower  == "dualstack")
+          block:
+            - name: Get IPv4 excluded CIDRs in DIT for {{ deployment_id }}
+              set_fact:
+                exclude_cidrs: "{{ exclude_cidrs|default([]) + [ '/'.join((item.ipv4, '32'))] }}"
+              with_items: "{{ dit_project.exclusion_ipv4_addresses }}"
+
+            - name: Get IPv6 excluded CIDRs in DIT for {{ deployment_id }}
+              set_fact:
+                exclude_cidrs: "{{ exclude_cidrs|default([]) + [ '/'.join((item.ipv6, '128'))] }}"
+              with_items: "{{ dit_project.exclusion_ipv6_addresses }}"
+
+            - name: Write exclude_cidrs ips
+              lineinfile:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                insertafter: "ipvs_excluded_cidrs:"
+                line: '    {{ exclude_cidrs | to_nice_yaml | indent(4) }}'
+
+            - name: Remove default ipvs_excluded_cidrs
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                after: "ipvs_excluded_cidrs:"
+                regexp: "- 3.3.3.0/24"
+                replace: ""
+
+            - name: Remove default ipvs_excluded_cidrs
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                after: "ipvs_excluded_cidrs:"
+                regexp: "- 7.7.7.0/24"
+                replace: ""
+
+            - name: Remove blank lines between matches
+              replace:
+                path: tmp-files/{{ deployment_id }}.env.yml
+                after: 'ipvs_excluded_cidrs:'
+                regexp: '(^\s*$)'
+                replace: ''
+
+            - name: Count exclude CIDRs IPs in DIT for {{ deployment_id }}
+              set_fact:
+                exclude_cidrs_count: "{{ exclude_cidrs|length }}"
+
+            - name: Verify that exclude CIDRs are defined in DIT for {{ deployment_id }}
+              fail:
+                msg: "{{ exclude_cidrs_count }} is not a valid number of exclude CIDRs in DIT for {{ deployment_id }}"
+              when: (exclude_cidrs_count |int < 2)
+
+##  End CIS-169261: Inclusion of ipvs_exclude_cidrs option
+
+
+
+## Start CIS-185030: cENM post_network_init needed in template-vmware-capo.yml
+
+        - name: Check if support required for cENM user script option
+          when: (user_script_option | lower == "true")
+          blockinfile:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            insertbefore: "kubernetes variables"
+            marker: "marker"
+            block: |2
+                    user_node_scripts:
+                      post_network_init: |
+                        IyEvdXNyL2Jpbi9lbnYgYmFzaAoKaWYgZ3JlcCAtbyAibmV0LmlwdjQuY29uZi5hbGwucnBfZmls
+                        dGVyIiAvZXRjL3N5c2N0bC5jb25mID4gL2Rldi9udWxsCnRoZW4KICAgICBvbGR2YWx1ZT0kKGdy
+                        ZXAgIm5ldC5pcHY0LmNvbmYuYWxsLnJwX2ZpbHRlciA9ICIgL2V0Yy9zeXNjdGwuY29uZiB8IGF3
+                        ayAneyBwcmludCAkMyB9JykKCiAgICAgaWYgWyAkb2xkdmFsdWUgLWVxIDEgXQogICAgIHRoZW4K
+                        ICAgICAgICBzZWQgLWkgIi9uZXQuaXB2NC5jb25mLmFsbC5ycF9maWx0ZXIgPS9zLzEvMC8iIC9l
+                        dGMvc3lzY3RsLmNvbmYKICAgICBmaQplbHNlCiAgICAgZWNobyAibmV0LmlwdjQuY29uZi5hbGwu
+                        cnBfZmlsdGVyID0gMCIgPj4gL2V0Yy9zeXNjdGwuY29uZgoKZmkKCmlmIGdyZXAgLW8gIm5ldC5p
+                        cHY0LmNvbmYuZXRoMC5ycF9maWx0ZXIiIC9ldGMvc3lzY3RsLmNvbmYgPiAvZGV2L251bGwKdGhl
+                        bgogICAgIG9sZHZhbHVlPSQoZ3JlcCAibmV0LmlwdjQuY29uZi5ldGgwLnJwX2ZpbHRlciA9ICIg
+                        L2V0Yy9zeXNjdGwuY29uZiB8IGF3ayAneyBwcmludCAkMyB9JykKCiAgICAgaWYgWyAkb2xkdmFs
+                        dWUgLWVxIDEgXQogICAgIHRoZW4KICAgICAgICBzZWQgLWkgIi9uZXQuaXB2NC5jb25mLmV0aDAu
+                        cnBfZmlsdGVyID0vcy8xLzAvIiAvZXRjL3N5c2N0bC5jb25mCiAgICAgZmkKZWxzZQogICAgIGVj
+                        aG8gIm5ldC5pcHY0LmNvbmYuZXRoMC5ycF9maWx0ZXIgPSAwIiA+PiAvZXRjL3N5c2N0bC5jb25m
+                        CgpmaQoKaWYgZ3JlcCAtbyAibmV0LmlwdjQudnMuY29ubnRyYWNrIiAvZXRjL3N5c2N0bC5jb25m
+                        ID4gL2Rldi9udWxsCnRoZW4KICAgICBvbGR2YWx1ZT0kKGdyZXAgIm5ldC5pcHY0LnZzLmNvbm50
+                        cmFjayA9ICIgL2V0Yy9zeXNjdGwuY29uZiB8IGF3ayAneyBwcmludCAkMyB9JykKCiAgICAgaWYg
+                        WyAkb2xkdmFsdWUgLWVxIDAgXQogICAgIHRoZW4KICAgICAgICBzZWQgLWkgIi9uZXQuaXB2NC52
+                        cy5jb25udHJhY2sgPS9zLzAvMS8iIC9ldGMvc3lzY3RsLmNvbmYKICAgICBmaQplbHNlCiAgICAg
+                        ZWNobyAibmV0LmlwdjQudnMuY29ubnRyYWNrID0gMSIgPj4gL2V0Yy9zeXNjdGwuY29uZgoKZmkK
+                        CmlmIGdyZXAgLW8gIm5ldC5pcHY0LnZzLnJ1bl9lc3RpbWF0aW9uIiAvZXRjL3N5c2N0bC5jb25m
+                        ID4gL2Rldi9udWxsCnRoZW4KICAgICBvbGR2YWx1ZT0kKGdyZXAgIm5ldC5pcHY0LnZzLnJ1bl9l
+                        c3RpbWF0aW9uID0gIiAvZXRjL3N5c2N0bC5jb25mIHwgYXdrICd7IHByaW50ICQzIH0nKQoKICAg
+                        ICBpZiBbICRvbGR2YWx1ZSAtZXEgMCBdCiAgICAgdGhlbgogICAgICAgIHNlZCAtaSAiL25ldC5p
+                        cHY0LnZzLnJ1bl9lc3RpbWF0aW9uID0vcy8wLzEvIiAvZXRjL3N5c2N0bC5jb25mCiAgICAgZmkK
+                        ZWxzZQogICAgIGVjaG8gIm5ldC5pcHY0LnZzLnJ1bl9lc3RpbWF0aW9uID0gMSIgPj4gL2V0Yy9z
+                        eXNjdGwuY29uZgoKZmkKCmlmIGdyZXAgLW8gInZtLm1heF9tYXBfY291bnQiIC9ldGMvc3lzY3Rs
+                        LmNvbmYgPiAvZGV2L251bGwKdGhlbgogICAgIG9sZHZhbHVlPSQoZ3JlcCAidm0ubWF4X21hcF9j
+                        b3VudCA9ICIgL2V0Yy9zeXNjdGwuY29uZiB8IGF3ayAneyBwcmludCAkMyB9JykKCiAgICAgaWYg
+                        WyAkb2xkdmFsdWUgLWVxIDY1NTMwIF0KICAgICB0aGVuCiAgICAgICAgc2VkIC1pICIvdm0ubWF4
+                        X21hcF9jb3VudCA9L3MvNjU1MzAvMjYyMTQ0LyIgL2V0Yy9zeXNjdGwuY29uZgogICAgIGZpCmVs
+                        c2UKICAgICBlY2hvICJ2bS5tYXhfbWFwX2NvdW50ID0gMjYyMTQ0IiA+PiAvZXRjL3N5c2N0bC5j
+                        b25mCgpmaQoKaWYgZ3JlcCAtbyAibmV0LmlwdjQudnMuY29ubl9yZXVzZV9tb2RlIiAvZXRjL3N5
+                        c2N0bC5jb25mID4gL2Rldi9udWxsCnRoZW4KICAgICBvbGR2YWx1ZT0kKGdyZXAgIm5ldC5pcHY0
+                        LnZzLmNvbm5fcmV1c2VfbW9kZSA9ICIgL2V0Yy9zeXNjdGwuY29uZiB8IGF3ayAneyBwcmludCAk
+                        MyB9JykKCiAgICAgaWYgWyAkb2xkdmFsdWUgLWVxIDEgXQogICAgIHRoZW4KICAgICAgICBzZWQg
+                        LWkgIi9uZXQuaXB2NC52cy5jb25uX3JldXNlX21vZGUgPS9zLzEvMC8iIC9ldGMvc3lzY3RsLmNv
+                        bmYKICAgICBmaQplbHNlCiAgICAgZWNobyAibmV0LmlwdjQudnMuY29ubl9yZXVzZV9tb2RlID0g
+                        MCIgPj4gL2V0Yy9zeXNjdGwuY29uZgoKZmkKCmlmIGdyZXAgLW8gIm5ldC5pcHY0LnZzLmV4cGly
+                        ZV9ub2Rlc3RfY29ubiIgL2V0Yy9zeXNjdGwuY29uZiA+IC9kZXYvbnVsbAp0aGVuCiAgICAgb2xk
+                        dmFsdWU9JChncmVwICJuZXQuaXB2NC52cy5leHBpcmVfbm9kZXN0X2Nvbm4gPSAiIC9ldGMvc3lz
+                        Y3RsLmNvbmYgfCBhd2sgJ3sgcHJpbnQgJDMgfScpCgogICAgIGlmIFsgJG9sZHZhbHVlIC1lcSAw
+                        IF0KICAgICB0aGVuCiAgICAgICAgc2VkIC1pICIvbmV0LmlwdjQudnMuZXhwaXJlX25vZGVzdF9j
+                        b25uID0vcy8wLzEvIiAvZXRjL3N5c2N0bC5jb25mCiAgICAgZmkKZWxzZQogICAgIGVjaG8gIm5l
+                        dC5pcHY0LnZzLmV4cGlyZV9ub2Rlc3RfY29ubiA9IDEiID4+IC9ldGMvc3lzY3RsLmNvbmYKCmZp
+                        CgoKc3lzY3RsIC1wCgoK
+
+        - name: Remove block marker
+          replace:
+            path: tmp-files/{{ deployment_id }}.env.yml
+            regexp: 'marker$'
+            replace: ''
+          when: (user_script_option | lower == "true")
+## Add GitOps metadada
+        - name: Create meta data file 
+          template:
+            src: templates/meta-info-template.j2
+            dest: tmp-files/meta-info.yml
+
+        - name: Add meta info to the env file
+          shell: "cd tmp-files; cat {{ deployment_id }}.env.yml >> meta-info.yml; mv meta-info.yml {{ deployment_id }}.env.yml " # noqa 204 301
+## End CIS-185030: cENM post_network_init needed in template-vmware-capo.yml
+
+        - name: "Upload {{ deployment_id }}.env.yml into MinIO bucket"
+          aws_s3:
+            aws_access_key: "{{ minio_xdn_access_key }}"
+            aws_secret_key: "{{ minio_xdn_secret_key }}"
+            s3_url: "{{ minio_xdn_url }}"
+            encrypt: no
+            bucket: sts-cni
+            object: /ccd/{{ deployment_id }}/{{ deployment_id }}.capo.env.yml
+            src: tmp-files/{{ deployment_id }}.env.yml
+            mode: put
+            ignore_nonexistent_bucket: True
+          delegate_to: localhost
+
+      always:
+        - name: Delete temp config directory
+          file:
+            path: ./tmp-files
+            state: absent

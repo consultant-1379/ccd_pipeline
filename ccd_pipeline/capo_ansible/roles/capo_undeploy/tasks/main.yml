@@ -1,0 +1,8 @@
+# Role to Undeploy CAPO cluster for deploymet_id
+---
+- name: Set ccdadm executable path variable
+  set_fact:
+    ccdadm_bin: "{{ ccdadm.files[0].path }}"
+
+- name: UnDeploy CAPO cluster for {{ deployment_id }}
+  command: "{{ ccdadm_bin }} cluster undeploy --configdir {{ capo_config_path }}/{{ deployment_id }}/ --debug"

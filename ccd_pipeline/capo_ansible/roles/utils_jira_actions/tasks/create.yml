@@ -1,0 +1,29 @@
+---
+- name: Create JIRA Issue
+  uri:
+    url: "{{ jira_url }}"
+    user: "{{ jira_username }}"
+    password: "{{ jira_password }}"
+    method: POST
+    body:
+      fields:
+        project:
+          key: "{{ project }}"
+        summary: "{{ summary }}"
+        customfield_15706: "{{ sub_area_team }}"
+        issuetype:
+          name: "{{ issue_type }}"
+        customfield_16801:
+          value: "{{ pdg_area }}"
+        customfield_16800:
+          value: "{{ site_location }}"
+        components: "{{ components }}"
+        description: "{{ description }}"
+    force_basic_auth: yes
+    status_code: 201
+    body_format: json
+  register: create_result
+
+- name: Set the JIRA Create Result
+  set_fact:
+    jira_create_result: "{{ create_result.json }}"
